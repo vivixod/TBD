@@ -1,0 +1,35 @@
+# ===== 大数据 / 缓存（绝不提交）=====
+cache_features/
+logs/
+weights/
+RawData/
+
+# ===== 调试输出 =====
+debug_bbox_output/
+debug_epoch_vis/
+debug_pseudo_output/
+check_dataset_names*.csv
+experiment_summary.xlsx
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+
+# ===== 大 split 列表（coco 165M / pascal 14M，本项目不使用）=====
+data/splits/lists/coco/
+data/splits/lists/pascal/
+
+# ===== 个人文档 / 实验记录 =====
+*.docx
+*.pdf
+monthly_report*.txt
+paper.txt
+
+# ===== 编辑器 =====
+.vscode/
+
+# ===== 杂物 =====
+python3
