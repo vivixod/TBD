@@ -63,7 +63,7 @@ def main():
     if isinstance(ckpt, dict) and 'model' in ckpt:
         model.load_state_dict({k.replace('module.', ''): v for k, v in ckpt['model'].items()})
         if ckpt.get('sam_model') is not None:
-            sam_model.load_state_dict({k.replace('module.', ''): v for k, v in ckpt['sam_model'].items()})
+            sam_model.load_state_dict({k.replace('module.', ''): v for k, v in ckpt['sam_model'].items()}, strict=False)
             print('==> SAM 微调权重已加载')
         else:
             print('!! 无 sam_model 权重，用官方预训练')

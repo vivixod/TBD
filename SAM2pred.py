@@ -127,19 +127,7 @@ class  SAM_pred(nn.Module):
         binary_mask = torch.where(low_masks > 0, 1, 0)
         return low_masks, binary_mask
 
-    # ==================== 级联精修（Cascaded Post-refinement） ====================
-    def _mask_to_attn_bias(self, mask, alpha, normalize=True):
-        """mask [B,1,H,W] 置信图 → [B,1,1,4096] 注意力 bias。
-        normalize=True 时做 min-max 到 [0,1]（与 attention logits 同量级）。"""
-        bs = mask.shape[0]
-        cm = F.interpolate(mask.float(), size=(64, 64), mode='bilinear',
-                           align_corners=True).view(bs, -1)        # [B, 4096]
-        if normalize:
-            cm_min = cm.min(dim=1, keepdim=True)[0]
-            cm_max = cm.max(dim=1, keepdim=True)[0]
-            cm = (cm - cm_min) / (cm_max - cm_min + 1e-6)
-        return alpha * cm.unsqueeze(1).unsqueeze(1)                 # [B,1,1,4096]
-
+    # ==================== 级联精修（Cascaded Post-refinement，已弃用） ====================
     def _extract_posneg_points(self, low_masks, ori_size=(512, 512)):
         """从 logits 取置信度最高/最低点作为正负点 prompt。
         返回 (coords, labels)：coords [B,2,2] (x,y) 1024 空间，labels [B,2] = [[1,0]]。"""
@@ -176,11 +164,11 @@ class  SAM_pred(nn.Module):
         return torch.tensor(boxes, device=binary_mask.device, dtype=torch.float32)
 
     def _cascade_refine(self, query_feats, protos, low_masks, binary_mask,
-                        ori_size=(512, 512), attn_bias_alpha=1.0):
+                        ori_size=(512, 512)):
         """级联精修：SAM 第一遍输出 mask → 提 bbox → 官方 box 编码 → 拼进 protos 再喂第二遍。
         protos = 第一遍的 52 tokens（50 support tokens + 2 bbox tokens）。
         第二遍 protos2 = Concat(protos, box_embedding) = 54 tokens。
-        只跑轻量 decoder，不增加 image encoder 开销。"""
+        只跑轻量 decoder，不增加 image encoder 开销。（已确认负效果，默认不启用）"""
         # ---- 第二遍：提 bbox → 官方 box 编码 → 拼进 protos ----
         boxes3 = self._mask_to_bbox(binary_mask, ori_size)        # [B,4] xyxy 1024 空间
         box_embedding, _ = self.forward_prompt_encoder(
@@ -216,8 +204,7 @@ class  SAM_pred(nn.Module):
     #     return low_masks, binary_mask.squeeze(1)
     
     
-    def forward(self, query_img, query_name, protos, boxes=None, coarse_mask=None,
-                attn_bias_alpha=1.0, use_cascade=False):
+    def forward(self, query_img, query_name, protos, boxes=None, use_cascade=False):
         B, C_img, h, w = query_img.shape
 
         if self.use_cache:
@@ -226,7 +213,7 @@ class  SAM_pred(nn.Module):
         else:
             query_feats = self.forward_img_encoder(query_img)
 
-        # protos: [B, N, 256] (N=50 tokens)  → SAM sparse prompt
+        # protos: [B, N, 256] (N=52 tokens)  → SAM sparse prompt
         # boxes:  [B, 1, 4]  (predicted bbox) → SAM box prompt
         q_sparse_em, q_dense_em = self.forward_prompt_encoder(
                 points=None,
@@ -234,23 +221,14 @@ class  SAM_pred(nn.Module):
                 protos=protos,
                 masks=None)
 
-        # PerSAM 式 target-guided attention：coarse_mask [B,1,64,64] → 注意力 bias
-        attn_bias = None
-        if coarse_mask is not None:
-            bs = coarse_mask.shape[0]
-            cm = F.interpolate(coarse_mask.float(), size=(64, 64), mode='bilinear',
-                               align_corners=True).view(bs, -1)        # [B, 4096]，已 min-max 到 [0,1]
-            # 直接用置信图做位置加权：softmax 会把 4096 维摊薄到 ~1e-4 量级，
-            # 相对 attention logits（std≈0.7）完全无效；cm∈[0,1] 与 logits 同量级
-            attn_bias = attn_bias_alpha * cm.unsqueeze(1).unsqueeze(1)  # [B,1,1,4096]
-
+        # （PerSAM 式 coarse_mask→attn_bias 已删：试错后弃用的无用设计）
         low_masks, binary_mask = self.forward_mask_decoder(query_feats, q_sparse_em, q_dense_em,
-                                                           ori_size=(h, w), attn_bias=attn_bias)
+                                                           ori_size=(h, w), attn_bias=None)
 
         if use_cascade:
             low_masks, binary_mask = self._cascade_refine(
                 query_feats, protos, low_masks, binary_mask,
-                ori_size=(h, w), attn_bias_alpha=attn_bias_alpha)
+                ori_size=(h, w))
 
         return low_masks, binary_mask.squeeze(1)
 

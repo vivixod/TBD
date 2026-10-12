@@ -8,6 +8,9 @@ RawData/
 debug_bbox_output/
 debug_epoch_vis/
 debug_pseudo_output/
+vis_amos/
+vis_eicl_debug/
+btcv-temp/
 check_dataset_names*.csv
 experiment_summary.xlsx
 

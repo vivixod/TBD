@@ -62,6 +62,9 @@ def _dbg(msg):
         print(msg, flush=True)
 
 class DatasetBTCV(Dataset):
+    BTCV_CLASS_NAMES = ['spleen', 'right_kidney', 'left_kidney', 'gallbladder',
+                        'esophagus', 'liver', 'stomach', 'aorta', 'IVC',
+                        'portal_vein', 'pancreas', 'right_adrenal', 'left_adrenal']
     def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
         # 规范化 split 命名，对齐 PASCAL 的习惯
         self.split = 'val' if split in ['val', 'test'] else 'trn'
@@ -72,7 +75,6 @@ class DatasetBTCV(Dataset):
         self.benchmark = 'btcv'
         self.shot = shot
         self.use_original_imgsize = use_original_imgsize
-
         # 你的数据实体路径
         self.img_path = os.path.join(datapath, 'image')
         self.ann_path = os.path.join(datapath, 'mask')
@@ -80,6 +82,8 @@ class DatasetBTCV(Dataset):
 
         # 构建 Fold 的类别 ID (决定哪些器官用于训练，哪些用于验证)
         self.class_ids = self.build_class_ids()
+        # 类名与 class_ids 对齐（val 打印 per-class 指标用）
+        self.class_names = [self.BTCV_CLASS_NAMES[c] for c in self.class_ids]
         
         # 构建情景训练的“双重索引库”
         self.img_metadata = self.build_img_metadata()
@@ -269,6 +273,9 @@ class DatasetBTCV(Dataset):
 
 
 class DatasetBTCV2(Dataset):
+    BTCV_CLASS_NAMES = ['spleen', 'right_kidney', 'left_kidney', 'gallbladder',
+                        'esophagus', 'liver', 'stomach', 'aorta', 'IVC',
+                        'portal_vein', 'pancreas', 'right_adrenal', 'left_adrenal']
     def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
         # 规范化 split 命名，对齐 PASCAL 的习惯
         self.split = 'val' if split in ['val', 'test'] else 'trn'
@@ -287,6 +294,8 @@ class DatasetBTCV2(Dataset):
 
         # 构建 Fold 的类别 ID (决定哪些器官用于训练，哪些用于验证)
         self.class_ids = self.build_class_ids()
+        # 类名与 class_ids 对齐（val 打印 per-class 指标用）
+        self.class_names = [self.BTCV_CLASS_NAMES[c] for c in self.class_ids]
         
         # 构建情景训练的“双重索引库”
         self.img_metadata = self.build_img_metadata()

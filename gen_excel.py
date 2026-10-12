@@ -14,7 +14,7 @@ LOGS = [
 ]
 
 ROW_RE = re.compile(r"\*\*\* (Training|Validation).*Avg L: [0-9.]+.*mIoU:\s+([0-9.]+)")
-BEST_RE = re.compile(r"Model saved @(\d+) w/ val. mIoU:\s+([0-9]+(?:\.[0-9]+)?)")
+BEST_RE = re.compile(r"Model saved @(\d+) w/ val\.\s*(?:mIoU|Dice):\s+([0-9]+(?:\.[0-9]+)?)")
 
 
 def parse_log(path):

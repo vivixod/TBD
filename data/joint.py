@@ -7,14 +7,16 @@ episode 池内部完全独立（support/query 不会跨数据集）。设计通�
 设计要点：
   - 子 dataset 由元数据列表配置：[(name, datapath), ...]
   - 每个子 dataset 用 FSSDataset.datasets[name] 实例化
-  - 路由：idx % len(sub_datasets) → 选子 dataset；sub_idx = idx // N
-  - 训练时总 episode 数 = sum(各子 dataset.trn.__len__)
-  - 验证时 = sum(各子 dataset.val.__len__)，各子数据集各自 1000 episodes（仿 BTCV2 协议）
+  - **episode 模式**：__len__ = n_episodes；每次 __getitem__ 先按 sub_weights
+    掷骰子选子数据集，再从该数据集随机抽一个内部索引构建 episode
+    （避免大数据集（如 BraTS）在 epoch 中占比过高）
   - 每个 episode 增广由子 dataset 自己的 augment 函数负责（不强加统一）
 
 用法（train.py argparse）：
   --benchmark joint
   --joint-subdatasets 'btcv2:/path/to/btcv,amos:/path/to/amos'
+  --n-episodes 4000            # 每个 epoch 的 episode 数（默认 4000）
+  --joint-weights 1,1,1,1      # 数据集采样权重（默认均匀，逗号分隔）
   --fold 0 --shot 1 --epochs 50
 
 未来加新数据集：
@@ -39,13 +41,17 @@ class DatasetJoint(Dataset):
 
     def __init__(self, fold, transform, split, shot,
                  use_original_imgsize,
-                 sub_datasets_config=None, joint_subdatasets=None):
+                 sub_datasets_config=None, joint_subdatasets=None,
+                 n_episodes=None, sub_weights=None):
         """
         Args:
             sub_datasets_config (or joint_subdatasets):
                 list of (name, datapath) tuples，
                 例如 [('btcv2', '/data/btcv'), ('amos', '/data/amos')]
             fold, transform, split, shot, use_original_imgsize: 透传给每个子 dataset
+            n_episodes: 每个 epoch 的 episode 总数（episode 模式）；None 则回退到
+                        旧行为（sum(各子集长度)，idx 路由）
+            sub_weights: 各子数据集采样权重（长度 = n_sub）；None 则均匀
         """
         # 兼容两种 kw 名：sub_datasets_config（更内部）/ joint_subdatasets（外部接口）
         cfg = sub_datasets_config if sub_datasets_config is not None else joint_subdatasets
@@ -82,6 +88,17 @@ class DatasetJoint(Dataset):
         # 每个子 dataset 的 train/val 长度（验证阶段保持各子数据集 1000 episodes 独立评估）
         self._sub_lens = [len(ds) for ds in self.sub_datasets]
 
+        # ---- episode 模式配置 ----
+        self.n_episodes = n_episodes          # None → 旧行为（idx 路由）
+        if sub_weights is not None:
+            assert len(sub_weights) == self.n_sub, \
+                f'sub_weights 长度 {len(sub_weights)} != n_sub {self.n_sub}'
+            w = np.asarray(sub_weights, dtype=np.float64)
+        else:
+            w = np.ones(self.n_sub, dtype=np.float64)
+        assert (w > 0).all(), f'sub_weights 必须全为正: {sub_weights}'
+        self._sub_probs = w / w.sum()
+
         # class_id 全局重映射：第 i 个子 dataset 的 class_id 整体偏移到前面子 dataset 之后
         # 例如 BTCV2 (nclass=13) → [0..12], AMOS (nclass=15) → [13..27]
         # 这样 AverageMeter 单一 [2, nclass_total] buffer 不会撞 ID
@@ -100,22 +117,26 @@ class DatasetJoint(Dataset):
             self.class_ids.extend([c + off for c in ds.class_ids])
 
     def __len__(self):
-        # 训练时 = sum(各子 dataset trn.__len__)，验证时 = sum(各 val.__len__)
+        # episode 模式：固定 episode 数；None 则回退到 sum(各子集长度)
+        if self.n_episodes is not None:
+            return self.n_episodes
         return sum(self._sub_lens)
 
     def __getitem__(self, idx):
-        # 路由：idx % n_sub 选子 dataset，sub_idx = idx // n_sub
-        sub_idx = idx % self.n_sub
-        internal_idx = idx // self.n_sub
-        # 关键：internal_idx 必须取模，否则子数据集长度不同时越界 IndexError
+        if self.n_episodes is not None:
+            # episode 模式：先按权重选数据集，再从该数据集随机抽内部样本
+            sub_idx = int(np.random.choice(self.n_sub, p=self._sub_probs))
+            internal_idx = int(np.random.randint(len(self.sub_datasets[sub_idx])))
+        else:
+            # 旧行为：idx 路由（idx % n_sub 选子集，idx // n_sub 取内部）
+            sub_idx = idx % self.n_sub
+            internal_idx = (idx // self.n_sub) % len(self.sub_datasets[sub_idx])
         sub_ds = self.sub_datasets[sub_idx]
-        internal_idx = internal_idx % len(sub_ds)
         batch = sub_ds[internal_idx]
         # 加 dataset_idx / dataset_name 字段（不影响 train.py 现有逻辑）
         batch['dataset_idx'] = sub_idx
         batch['dataset_name'] = self.sub_datasets_config[sub_idx][0]
-        # class_id 重映射：避免 BTCV2 (0~12) 和 AMOS (0~14) 撞 ID 写入同一个 IoU buffer
-        # 把后续子 dataset 的 class_id 整体偏移到前面子 dataset 之后
+        # class_id 重映射：避免不同子数据集撞 ID 写入同一个 IoU buffer
         offset = self._class_id_offsets[sub_idx]
         batch['class_id'] = batch['class_id'] + offset
         return batch

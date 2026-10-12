@@ -260,24 +260,29 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
                         f'weight={args.bbox_loss_weight:.4f} '
                         f'cos avg={sum(bbox_cos_buf) / len(bbox_cos_buf):.4f}')
 
-    average_meter.write_result(split_name or ('Training' if training else 'Validation'), epoch)
+    average_meter.write_result(
+        split_name or ('Training' if training else 'Validation'), epoch,
+        class_names=getattr(dataloader.dataset, 'class_names', None),
+        print_per_class=not training,
+    )
     avg_loss = utils.mean(average_meter.loss_buf)
     miou, fb_iou = average_meter.compute_iou()
+    dice = average_meter.compute_dice()
 
-    return avg_loss, miou, fb_iou
+    return avg_loss, miou, fb_iou, dice
 
 
 def validate_joint(args, epoch, model, sam_model, val_loaders):
-    r""" joint 模式验证：每个子数据集跑一遍 train(training=False)，分别出 mIoU，
-    最后算 macro mIoU。
+    r""" joint 模式验证：每个子数据集跑一遍 train(training=False)，分别出 Dice，
+    最后算 macro Dice（主指标）；mIoU/FB-IoU 保留作参考。
 
     val_loaders: OrderedDict[(name, datapath)] -> DataLoader
 
     返回：
-        macro_loss, macro_miou, macro_fb_iou, per_dataset
+        macro_loss, macro_dice, macro_miou, macro_fb_iou, per_dataset
     """
     per_dataset = {}
-    miou_list, fb_list, loss_list = [], [], []
+    miou_list, fb_list, loss_list, dice_list = [], [], [], []
 
     for (name, _path), loader in val_loaders.items():
         # btcv2 → btcv 显示别名（两个 key 指向同一个 BTCV 数据集，区别在 split/fold 协议）
@@ -285,30 +290,32 @@ def validate_joint(args, epoch, model, sam_model, val_loaders):
         if utils.is_main_process():
             Logger.info(f'[val] [{display_name}] starting...')
         with torch.no_grad():
-            l, m, fb = train(args, epoch, model, sam_model, loader,
-                             optimizer=None, scheduler=None, training=False,
-                             split_name=f'val/{display_name}')
-        per_dataset[name] = {'loss': l, 'miou': m, 'fb_iou': fb}
+            l, m, fb, d = train(args, epoch, model, sam_model, loader,
+                                optimizer=None, scheduler=None, training=False,
+                                split_name=f'val/{display_name}')
+        per_dataset[name] = {'loss': l, 'miou': m, 'fb_iou': fb, 'dice': d}
         miou_list.append(m)
         fb_list.append(fb)
         loss_list.append(l)
+        dice_list.append(d)
 
     macro_loss = sum(loss_list) / max(len(loss_list), 1)
     macro_miou = sum(miou_list) / max(len(miou_list), 1)
     macro_fb_iou = sum(fb_list) / max(len(fb_list), 1)
+    macro_dice = sum(dice_list) / max(len(dice_list), 1)
 
     if utils.is_main_process():
         for name, d in per_dataset.items():
             display_name = name.replace('btcv2', 'btcv')
-            Logger.info(f'[val] [{display_name}] macro mIoU={d["miou"]:.2f}  FB-IoU={d["fb_iou"]:.2f}  Loss={d["loss"]:.4f}')
-        Logger.info(f'[val] [macro] mIoU={macro_miou:.2f}  FB-IoU={macro_fb_iou:.2f}  Loss={macro_loss:.4f}')
+            Logger.info(f'[val] [{display_name}] Dice={d["dice"]:.2f}  mIoU={d["miou"]:.2f}  FB-IoU={d["fb_iou"]:.2f}  Loss={d["loss"]:.4f}')
+        Logger.info(f'[val] [macro] Dice={macro_dice:.2f}  mIoU={macro_miou:.2f}  FB-IoU={macro_fb_iou:.2f}  Loss={macro_loss:.4f}')
         Logger.tbd_writer.add_scalars(
             'val/joint',
-            {'loss': macro_loss, 'miou': macro_miou, 'fb_iou': macro_fb_iou},
+            {'loss': macro_loss, 'dice': macro_dice, 'miou': macro_miou, 'fb_iou': macro_fb_iou},
             epoch,
         )
 
-    return macro_loss, macro_miou, macro_fb_iou, per_dataset
+    return macro_loss, macro_dice, macro_miou, macro_fb_iou, per_dataset
 
 
 if __name__ == '__main__':
@@ -319,6 +326,10 @@ if __name__ == '__main__':
     parser.add_argument('--benchmark', type=str, default='coco', choices=['pascal', 'coco', 'fss', 'btcv', 'btcv2', 'amos', 'joint'])
     parser.add_argument('--joint-subdatasets', type=str, default='',
                         help='联合训练子数据集列表，逗号分隔，格式：name:datapath[,name:datapath,...]。仅当 --benchmark joint 时生效。')
+    parser.add_argument('--n-episodes', type=int, default=4000,
+                        help='joint 训练每个 epoch 的 episode 总数（先按权重选数据集，再从该数据集随机抽样本）')
+    parser.add_argument('--joint-weights', type=str, default='',
+                        help='joint 各子数据集采样权重，逗号分隔（如 1,1,1,1）；留空则均匀。长度须等于子数据集数。')
     parser.add_argument('--logpath', type=str, default='')
     parser.add_argument('--bsz', type=int, default=2) # batch size = num_gpu * bsz default num_gpu = 4
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -421,6 +432,7 @@ if __name__ == '__main__':
     FSSDataset.initialize(img_size=512, datapath=args.datapath, use_original_imgsize=False)
     # 解析 joint 子数据集列表（仅 benchmark=='joint' 时使用）
     joint_sub = None
+    joint_weights = None
     if args.benchmark == 'joint':
         joint_sub = []
         for tok in args.joint_subdatasets.split(','):
@@ -434,9 +446,20 @@ if __name__ == '__main__':
         for n, p in joint_sub:
             print(f"  - {n}: {p}", flush=True)
 
+        # 采样权重：留空则均匀
+        if args.joint_weights.strip():
+            joint_weights = [float(x) for x in args.joint_weights.split(',') if x.strip()]
+            assert len(joint_weights) == len(joint_sub), \
+                f'--joint-weights 长度 {len(joint_weights)} != 子数据集数 {len(joint_sub)}'
+            assert all(w > 0 for w in joint_weights), f'--joint-weights 必须全为正: {joint_weights}'
+        else:
+            joint_weights = None
+        print(f"[main] joint episode 模式: n_episodes={args.n_episodes}, weights={joint_weights or '均匀'}", flush=True)
+
     # dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn')
     # dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val')
-    dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn', shot=args.shot, joint_subdatasets=joint_sub)
+    dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn', shot=args.shot, joint_subdatasets=joint_sub,
+                                                 n_episodes=args.n_episodes, sub_weights=joint_weights)
 
     # joint 模式 val 按子数据集分别构造 DataLoader（每个子集单独出 mIoU，最后算 macro）
     if args.benchmark == 'joint':
@@ -448,36 +471,39 @@ if __name__ == '__main__':
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max= args.epochs * len(dataloader_trn))
     # Training
-    best_val_miou = float('-inf')
+    best_val_dice = float('-inf')
     best_val_loss = float('inf')
     for epoch in range(args.epochs):
 
-        trn_loss, trn_miou, trn_fb_iou = train(args, epoch, model, sam_model, dataloader_trn, optimizer, scheduler, training=True)
+        trn_loss, trn_miou, trn_fb_iou, trn_dice = train(args, epoch, model, sam_model, dataloader_trn, optimizer, scheduler, training=True)
         if val_loaders is not None:
-            # joint 模式：每个子数据集跑一遍 val，返回 macro
-            val_loss, val_miou, val_fb_iou, per_dataset = validate_joint(args, epoch, model, sam_model, val_loaders)
+            # joint 模式：每个子数据集跑一遍 val，返回 macro Dice（主指标）
+            val_loss, val_dice, val_miou, val_fb_iou, per_dataset = validate_joint(args, epoch, model, sam_model, val_loaders)
         else:
             with torch.no_grad():
-                val_loss, val_miou, val_fb_iou = train(args, epoch, model, sam_model, dataloader_val, optimizer, scheduler, training=False)
+                val_loss, val_miou, val_fb_iou, val_dice = train(args, epoch, model, sam_model, dataloader_val, optimizer, scheduler, training=False)
             per_dataset = None
 
-        # Save the best model (joint 模式用 macro mIoU，单 dataset 模式用 val_miou)
-        if val_miou > best_val_miou:
-            best_val_miou = val_miou
+        # Save the best model（Dice 为主指标）
+        if val_dice > best_val_dice:
+            best_val_dice = val_dice
             if utils.is_main_process():
-                Logger.save_model_miou(model, sam_model, epoch, val_miou)
+                Logger.save_model_dice(model, sam_model, epoch, val_dice)
         if utils.is_main_process():
             trn_dict = {'trn_loss': trn_loss, 'val_loss': val_loss}
             miou_dict = {'trn_miou': trn_miou, 'val_miou': val_miou}
             fb_dict = {'trn_fb_iou': trn_fb_iou, 'val_fb_iou': val_fb_iou}
+            dice_dict = {'trn_dice': trn_dice, 'val_dice': val_dice}
             if per_dataset is not None:
                 for name, mdict in per_dataset.items():
                     miou_dict[f'val/{name}_miou'] = mdict['miou']
                     fb_dict[f'val/{name}_fb_iou'] = mdict['fb_iou']
+                    dice_dict[f'val/{name}_dice'] = mdict['dice']
                     trn_dict[f'val/{name}_loss'] = mdict['loss']
             Logger.tbd_writer.add_scalars('data/loss', trn_dict, epoch)
             Logger.tbd_writer.add_scalars('data/miou', miou_dict, epoch)
             Logger.tbd_writer.add_scalars('data/fb_iou', fb_dict, epoch)
+            Logger.tbd_writer.add_scalars('data/dice', dice_dict, epoch)
             Logger.tbd_writer.flush()
     if utils.is_main_process():
         Logger.tbd_writer.close()

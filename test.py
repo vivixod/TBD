@@ -73,7 +73,8 @@ if __name__ == '__main__':
     model.load_state_dict(new_state_dict)
     if sam_ckpt is not None:
         sam_state_dict = {k.replace('module.', ''): v for k, v in sam_ckpt.items()}
-        sam_model.load_state_dict(sam_state_dict)
+        # strict=False：checkpoint 只存微调组件（prompt_encoder/mask_decoder），image_encoder 用官方权重
+        sam_model.load_state_dict(sam_state_dict, strict=False)
         print("==> SAM 微调权重已加载")
     else:
         print("==> 未找到 sam_model 权重，使用 SAM 官方预训练权重（结果会偏低）")

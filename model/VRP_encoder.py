@@ -277,11 +277,11 @@ class VRP_encoder(nn.Module):
         
         # ==================================================
         # 特征拼接 + Transformer Decoder → 50 tokens（恢复）
-        # 双路检索后 query/supp 输入均为:
-        #   [自身特征 256, 前景证据 256, 背景证据 256, coarse_mask 1] = 769 通道
+        # 单路检索后 query/supp 输入均为:
+        #   [自身特征 256, attended_supp 256, pseudo_mask 1] = 513 通道
         # ==================================================
         self.merge_1 = nn.Sequential(
-            nn.Conv2d(hidden_dim*3+1, hidden_dim, kernel_size=1, padding=0, bias=False),
+            nn.Conv2d(hidden_dim*2+1, hidden_dim, kernel_size=1, padding=0, bias=False),
             nn.ReLU(inplace=False),
         )
         self.proto_dropout = nn.Dropout(0.1)
@@ -397,13 +397,12 @@ class VRP_encoder(nn.Module):
         B, C, H, W = query_feat_down.shape
         
         # ==========================================
-        # 步骤 2: E-ICL 双路检索（前景/背景证据解耦）
-        #   A = softmax(Q^T K / τ)        →  patch 级对应关系（不变）
-        #   coarse = A @ M                →  粗略定位图
-        #   R_fg   = A @ (M ⊙ K)          →  前景语义证据（positive）
-        #   R_bg   = A @ ((1-M) ⊙ K)      →  背景解剖上下文证据（negative）
+        # 步骤 2: E-ICL 单路检索（EICSeg 原式）
+        #   A = softmax(Q^T K / τ)    →  patch 级对应关系
+        #   pseudo = A @ M            →  粗略定位图
+        #   attended = A @ K          →  加权 support 特征
         # ==========================================
-        coarse_mask, attended_fg, attended_bg = self.eicl_interaction(
+        pseudo_mask, attended_supp = self.eicl_interaction(
             query_feat_down, supp_feat_down, supp_mask_down
         )
 
@@ -412,15 +411,13 @@ class VRP_encoder(nn.Module):
         # ==========================================
         query_feat_1 = self.merge_1(torch.cat([
             query_feat_down,
-            attended_fg,
-            attended_bg,
-            coarse_mask
+            attended_supp,
+            pseudo_mask
         ], dim=1))
 
         supp_feat_1 = self.merge_1(torch.cat([
             supp_feat_down,
             supp_feat_down * supp_mask_down,
-            supp_feat_down * (1 - supp_mask_down),
             supp_mask_down
         ], dim=1))
 
@@ -451,8 +448,8 @@ class VRP_encoder(nn.Module):
                                               supp_feat_fg,
                                               query_feat_down)  # [B, 2, 256]
 
-        # 返回：50 tokens + 2 个框 token + coarse_mask
-        return protos, query_bbox_token, coarse_mask
+        # 返回：50 tokens + 2 个框 token + pseudo_mask
+        return protos, query_bbox_token, pseudo_mask
 
     def mask_feature(self, features, support_mask):
         mask = support_mask

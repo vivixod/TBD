@@ -101,6 +101,16 @@ class DatasetAMOS(Dataset):
         self.img_metadata = self.build_img_metadata()
         self.img_metadata_classwise = self.build_img_metadata_classwise()
 
+        # 类名（与 class_ids 对齐，val 打印 per-class 指标用）
+        import json as _json
+        try:
+            j = _json.load(open(os.path.join(datapath, 'dataset.json')))
+            labels = j.get('labels', {})
+            all_names = [labels.get(str(c), f'c{c}') for c in range(1, self.nclass + 1)]
+        except Exception:
+            all_names = [f'c{c}' for c in range(1, self.nclass + 1)]
+        self.class_names = [all_names[c] for c in self.class_ids]
+
         # 缓存每个 image_name 的 in-plane shape（避免 __getitem__ 重复 glob）
         self._shape_cache = {}
         # 缓存每张图的器官类别集合（避免 sample_episode 重复解码 npz）

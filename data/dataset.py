@@ -1,5 +1,7 @@
 r""" Dataloader builder for few-shot semantic segmentation dataset  """
 import torch
+import numpy as np
+import random
 from torchvision import transforms
 from torch.utils.data import DataLoader
 
@@ -7,8 +9,21 @@ from data.pascal import DatasetPASCAL
 from data.coco import DatasetCOCO
 from data.btcv import DatasetBTCV,DatasetBTCV2
 from data.amos import DatasetAMOS
+from data.adam import DatasetAdam
+from data.brats import DatasetBraTS
 from data.joint import DatasetJoint
 # from data.coco2pascal import DatasetCOCO2PASCAL
+
+
+def worker_init_fn(worker_id):
+    """每个 DataLoader worker 用独立随机种子（基于 torch 分发的 worker seed）。
+
+    episode 模式下 __getitem__ 依赖 np.random 随机选数据集/样本，fork 出来的
+    worker 会继承相同 RNG 状态导致采样序列重复，这里按 worker 重播种。
+    """
+    seed = torch.initial_seed() % (2 ** 31)
+    np.random.seed(seed)
+    random.seed(seed)
 
 
 class FSSDataset:
@@ -22,6 +37,8 @@ class FSSDataset:
             'btcv': DatasetBTCV,
             'btcv2': DatasetBTCV2,
             'amos': DatasetAMOS,
+            'adam': DatasetAdam,
+            'brats': DatasetBraTS,
             'joint': DatasetJoint,
             # 'coco2pascal': DatasetCOCO2PASCAL
         }
@@ -36,7 +53,8 @@ class FSSDataset:
                                             transforms.Normalize(cls.img_mean, cls.img_std)])
 
     @classmethod
-    def build_dataloader(cls, benchmark, bsz, nworker, fold, split, shot=1, joint_subdatasets=None):
+    def build_dataloader(cls, benchmark, bsz, nworker, fold, split, shot=1,
+                         joint_subdatasets=None, n_episodes=None, sub_weights=None):
         # Force randomness during training for diverse episode combinations
         # Freeze randomness during testing for reproducibility
         shuffle = split == 'trn'
@@ -49,6 +67,8 @@ class FSSDataset:
                 joint_subdatasets=joint_subdatasets,
                 fold=fold, transform=cls.transform,
                 split=split, shot=shot, use_original_imgsize=cls.use_original_imgsize,
+                n_episodes=n_episodes if split == 'trn' else None,
+                sub_weights=sub_weights if split == 'trn' else None,
             )
         else:
             dataset = cls.datasets[benchmark](cls.datapath, fold=fold, transform=cls.transform, split=split, shot=shot, use_original_imgsize=cls.use_original_imgsize)
@@ -66,6 +86,8 @@ class FSSDataset:
         gen = torch.Generator()
         rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
         gen.manual_seed(20250818 + rank * 1000003)
-        dataloader = DataLoader(dataset, batch_size=bsz, shuffle=False, pin_memory=True, num_workers=nworker, sampler=sampler, generator=gen)
+        dataloader = DataLoader(dataset, batch_size=bsz, shuffle=False, pin_memory=True,
+                                num_workers=nworker, sampler=sampler, generator=gen,
+                                worker_init_fn=worker_init_fn)
 
         return dataloader

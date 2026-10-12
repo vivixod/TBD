@@ -1,0 +1,281 @@
+"""医学图像 few-shot dataset 共享基类（MR/CT 通用）。
+
+从 data/amos.py 的 DatasetAMOS 提炼而来，数据集间差异全部参数化：
+  - name: benchmark 名（决定 split 列表目录 data/splits/lists/<name>/）
+  - nclass: 前景类数
+  - img_mean / img_std: 归一化常量（各数据集实测）
+  - 增广参数：旋转/平移/对比度/噪声强度（各数据集个性化）
+
+子类示例见 data/adam.py、data/brats.py。
+"""
+import os
+import glob
+import numpy as np
+import scipy.sparse as sp
+from PIL import Image
+import torch
+import torch.nn.functional as F
+from torch.utils.data import Dataset
+import cv2
+
+
+# ===================== MR 友好增广（无 CT 窗位假设） =====================
+def mr_augment(img_pil, mask_tensor, angle=10.0, trans=0.03, contrast=0.1,
+               noise_sigma=(1.0, 3.0), noise_p=0.3):
+    """MR 友好几何+强度增广。
+
+    - 几何：旋转 [-angle, angle]° + 平移 ±trans（img 双线性 / mask 最近邻）
+    - 强度：对比度扰动 ±contrast（无窗位假设）+ 高斯噪声 σ∈noise_sigma, p=noise_p
+    - 截断到 [0, 255]
+    """
+    img = np.array(img_pil).astype(np.float32)
+    mask = mask_tensor.numpy().astype(np.int64)
+    h, w = img.shape[:2]
+
+    a = np.random.uniform(-angle, angle)
+    tx = np.random.uniform(-trans, trans) * w
+    ty = np.random.uniform(-trans, trans) * h
+    if abs(a) > 0.5 or abs(tx) > 1 or abs(ty) > 1:
+        M = cv2.getRotationMatrix2D((w / 2, h / 2), a, 1.0)
+        M[0, 2] += tx
+        M[1, 2] += ty
+        img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        mask = cv2.warpAffine(mask, M, (w, h), flags=cv2.INTER_NEAREST,
+                              borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+
+    if np.random.rand() < 0.5:
+        c = np.random.uniform(1 - contrast, 1 + contrast)
+        mean = np.mean(img)
+        img = (img - mean) * c + mean
+
+    if np.random.rand() < noise_p:
+        sigma = np.random.uniform(*noise_sigma)
+        img = img + np.random.normal(0, sigma, img.shape)
+
+    img = np.clip(img, 0, 255)
+    return Image.fromarray(img.astype(np.uint8)), torch.from_numpy(mask)
+
+
+class MedicalDataset(Dataset):
+    r"""通用医学 2D few-shot dataset（episode 协议与 data/amos.py 完全一致）。
+
+    数据布局（datapath 下）：
+      image/{x,y}/*.png            # RGB 切片
+      label/{x,y}___*.npz          # CSR sparse, shape=[nclass, H*W]
+      data/splits/lists/<name>/fss_list/{train,val}/data_list_0.txt
+                                    sub_class_file_list_0.txt
+    """
+
+    def __init__(self, datapath, fold, transform, split, shot,
+                 use_original_imgsize, name, nclass, img_mean, img_std,
+                 aug_params=None):
+        self.split_norm = 'val' if split in ['val', 'test'] else 'train'
+        self.split = 'val' if split in ['val', 'test'] else 'trn'
+        self.fold = fold
+        self.nfolds = 4
+        self.nclass = nclass
+        self.benchmark = name
+        self.shot = shot
+        self.use_original_imgsize = use_original_imgsize
+
+        self.img_path = datapath
+        self.label_path = datapath
+
+        self.transform = self._build_transform(transform, img_mean, img_std)
+
+        # 个性化增广参数（None 用默认）
+        self.aug_params = aug_params or {}
+
+        self.class_ids = self.build_class_ids()
+        self.img_metadata = self.build_img_metadata()
+        self.img_metadata_classwise = self.build_img_metadata_classwise()
+
+        # 类名（与 class_ids 对齐，val 打印 per-class 指标用）
+        self.class_names = self._load_class_names()
+
+        self._shape_cache = {}
+        self._label_classes_cache = {}
+
+    def _load_class_names(self):
+        """从 dataset.json 的 labels 读类名（按 class_ids 顺序）。"""
+        import json
+        try:
+            j = json.load(open(os.path.join(self.img_path, 'dataset.json')))
+            labels = j.get('labels', {})
+            all_names = [labels.get(str(c), f'c{c}') for c in range(1, self.nclass + 1)]
+        except Exception:
+            all_names = [f'c{c}' for c in range(1, self.nclass + 1)]
+        return [all_names[c] for c in self.class_ids]
+
+    @staticmethod
+    def _build_transform(transform, img_mean, img_std):
+        """把传入 Compose 的 Normalize 层替换为数据集自有的 mean/std。"""
+        from torchvision import transforms
+        new_steps = []
+        for step in transform.transforms:
+            if isinstance(step, transforms.Normalize):
+                new_steps.append(transforms.Normalize(img_mean, img_std))
+            else:
+                new_steps.append(step)
+        return transforms.Compose(new_steps)
+
+    def _augment(self, img_pil, mask_tensor):
+        return mr_augment(img_pil, mask_tensor, **self.aug_params)
+
+    def __len__(self):
+        return len(self.img_metadata) if self.split == 'trn' else 1000
+
+    def __getitem__(self, idx):
+        idx %= len(self.img_metadata)
+
+        query_name, support_names, class_sample = self.sample_episode(idx)
+        query_img, query_cmask, support_imgs, support_cmasks, org_qry_imsize = \
+            self.load_frame(query_name, support_names)
+
+        if self.split == 'trn':
+            query_img, query_cmask = self._augment(query_img, query_cmask)
+            supp_aug = [self._augment(si, sm) for si, sm in zip(support_imgs, support_cmasks)]
+            support_imgs, support_cmasks = [a[0] for a in supp_aug], [a[1] for a in supp_aug]
+
+        query_img = self.transform(query_img)
+        if not self.use_original_imgsize:
+            query_cmask = F.interpolate(
+                query_cmask.unsqueeze(0).unsqueeze(0).float(),
+                size=query_img.size()[-2:], mode='nearest',
+            ).squeeze()
+        query_mask, query_ignore_idx = self.extract_ignore_idx(query_cmask.float(), class_sample)
+
+        support_imgs = torch.stack([self.transform(s) for s in support_imgs])
+        support_masks, support_ignore_idxs = [], []
+        for scmask in support_cmasks:
+            scmask = F.interpolate(
+                scmask.unsqueeze(0).unsqueeze(0).float(),
+                size=support_imgs.size()[-2:], mode='nearest',
+            ).squeeze()
+            sm, si = self.extract_ignore_idx(scmask.float(), class_sample)
+            support_masks.append(sm)
+            support_ignore_idxs.append(si)
+        support_masks = torch.stack(support_masks)
+        support_ignore_idxs = torch.stack(support_ignore_idxs)
+
+        batch = {
+            'query_img': query_img,
+            'query_mask': query_mask,
+            'query_name': query_name,
+            'query_ignore_idx': query_ignore_idx,
+            'org_query_imsize': org_qry_imsize,
+            'support_imgs': support_imgs,
+            'support_masks': support_masks,
+            'support_names': support_names,
+            'support_ignore_idxs': support_ignore_idxs,
+            'class_id': torch.tensor(class_sample),
+        }
+        return batch
+
+    # ===================== 协议层（与 data/amos.py 一致） =====================
+    def extract_ignore_idx(self, mask, class_id):
+        boundary = torch.zeros_like(mask)
+        target_pixel_val = class_id + 1
+        mask[mask != target_pixel_val] = 0
+        mask[mask == target_pixel_val] = 1
+        return mask, boundary
+
+    def load_frame(self, query_name, support_names):
+        query_img = self.read_img(query_name)
+        query_mask = self.read_mask(query_name)
+        support_imgs = [self.read_img(n) for n in support_names]
+        support_masks = [self.read_mask(n) for n in support_names]
+        org_qry_imsize = query_img.size
+        return query_img, query_mask, support_imgs, support_masks, org_qry_imsize
+
+    # ===================== 数据读取 =====================
+    def _split_prefix(self, image_name):
+        """'x___amos_0507_5' → ('x', 'amos_0507_5')"""
+        for prefix in ('x', 'y'):
+            if image_name.startswith(f'{prefix}___'):
+                return prefix, image_name[4:]
+        raise ValueError(f"Unknown prefix in image_name: {image_name}")
+
+    def read_img(self, img_name):
+        prefix, clean = self._split_prefix(img_name)
+        img_p = os.path.join(self.img_path, 'image', prefix, clean + '.png')
+        return Image.open(img_p).convert('RGB')
+
+    def read_mask(self, img_name):
+        """CSR npz → 单通道 (H, W)，值 0~nclass（0=背景）。"""
+        prefix, clean = self._split_prefix(img_name)
+        npz_glob = glob.glob(
+            os.path.join(self.label_path, 'label', f'{prefix}___{clean}.*.npz')
+        )
+        if not npz_glob:
+            raise FileNotFoundError(f"No npz for {img_name}")
+        npz = np.load(npz_glob[0])
+        csr = sp.csr_matrix(
+            (npz['data'], npz['indices'], npz['indptr']),
+            shape=tuple(npz['shape']),
+        )
+        n_class = int(npz['shape'][0])
+        n_hxw = int(npz['shape'][1])
+        dense = csr.toarray().reshape(n_class, n_hxw)
+        label = dense.argmax(axis=0) + 1
+        label[dense.sum(axis=0) == 0] = 0
+        if img_name in self._shape_cache:
+            H, W = self._shape_cache[img_name]
+        else:
+            img = self.read_img(img_name)
+            H, W = img.size[1], img.size[0]
+            self._shape_cache[img_name] = (H, W)
+        label_2d = label.reshape(H, W)
+        return torch.tensor(label_2d.astype(np.int64))
+
+    def _label_classes(self, img_name):
+        if img_name not in self._label_classes_cache:
+            self._label_classes_cache[img_name] = self.read_mask(img_name).unique().tolist()
+        return self._label_classes_cache[img_name]
+
+    def sample_episode(self, idx):
+        query_name = self.img_metadata[idx]
+        label_class = self._label_classes(query_name)
+        if 0 in label_class:
+            label_class.remove(0)
+        label_class_0 = [c - 1 for c in label_class]
+        valid_classes = [c for c in label_class_0 if c in self.class_ids]
+        if len(valid_classes) == 0:
+            class_sample = self.class_ids[0]
+        else:
+            class_sample = int(np.random.choice(valid_classes))
+
+        candidates = self.img_metadata_classwise.get(class_sample + 1, [])
+        support_names = []
+        while len(support_names) < self.shot:
+            if len(candidates) == 0:
+                support_name = query_name
+            else:
+                support_name = np.random.choice(candidates)
+            if query_name != support_name or len(candidates) <= 1:
+                support_names.append(support_name)
+        return query_name, support_names, class_sample
+
+    def build_class_ids(self):
+        return list(range(self.nclass))
+
+    def build_img_metadata(self):
+        list_file = f'data/splits/lists/{self.benchmark}/fss_list/{self.split_norm}/data_list_{self.fold}.txt'
+        with open(list_file, 'r') as f:
+            metadata = [line.strip().split(' ')[0].split('/')[-1].split('.')[0]
+                        for line in f if line.strip()]
+        return metadata
+
+    def build_img_metadata_classwise(self):
+        subclass_file = f'data/splits/lists/{self.benchmark}/fss_list/{self.split_norm}/sub_class_file_list_{self.fold}.txt'
+        with open(subclass_file, 'r') as f:
+            sub_data = f.read()
+        sub_class_file_list = eval(sub_data)
+        img_metadata_classwise = {}
+        for sub_cls in sub_class_file_list.keys():
+            img_metadata_classwise[sub_cls] = [
+                data[0].split('/')[-1].split('.')[0]
+                for data in sub_class_file_list[sub_cls]
+            ]
+        return img_metadata_classwise

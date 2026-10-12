@@ -65,7 +65,21 @@ class AverageMeter:
         mdice = dice_fg.mean() * 100
         return mdice
 
-    def write_result(self, split, epoch):
+    def compute_per_class_iou(self):
+        """前景行每类 IoU（按 class_ids_interest 顺序），返回 tensor [nclass]。"""
+        iou = self.intersection_buf.float() / \
+              torch.max(torch.stack([self.union_buf, self.ones]), dim=0)[0]
+        iou = iou.index_select(1, self.class_ids_interest)
+        return iou[1] * 100
+
+    def compute_per_class_dice(self):
+        """前景行每类 Dice（按 class_ids_interest 顺序），返回 tensor [nclass]。"""
+        inter = self.intersection_buf.index_select(1, self.class_ids_interest)
+        union = self.union_buf.index_select(1, self.class_ids_interest)
+        dice_fg = 2.0 * inter[1] / (union[1] + inter[1] + 1e-6)
+        return dice_fg * 100
+
+    def write_result(self, split, epoch, class_names=None, print_per_class=False):
         self.intersection_buf, self.union_buf = self.reduce_metrics([self.intersection_buf, self.union_buf], False)
         iou, fb_iou = self.compute_iou()
         dice = self.compute_dice()
@@ -83,6 +97,24 @@ class AverageMeter:
 
         msg += '***\n'
         Logger.info(msg)
+
+        # 每类 IoU/Dice（val 排查用；默认关，避免训练日志过吵）
+        if not print_per_class:
+            return
+        per_cls_iou = self.compute_per_class_iou()
+        per_cls_dice = self.compute_per_class_dice()
+        n = per_cls_iou.numel()
+        if n == 0:
+            return
+        if class_names is None or len(class_names) < n:
+            names = (list(class_names) if class_names else []) + \
+                    [f'c{i}' for i in range(len(class_names) if class_names else 0, n)]
+        else:
+            names = list(class_names)
+        iou_str = ', '.join(f'{names[i]}={per_cls_iou[i].item():.1f}' for i in range(n))
+        dice_str = ', '.join(f'{names[i]}={per_cls_dice[i].item():.1f}' for i in range(n))
+        Logger.info(f'[per-class IoU ] {iou_str}')
+        Logger.info(f'[per-class Dice] {dice_str}')
 
     def write_process(self, batch_idx, datalen, epoch, write_batch_idx=20):
         if batch_idx % write_batch_idx == 0:
@@ -150,12 +182,16 @@ class Logger:
         logging.info(msg)
 
     @classmethod
-    def save_model_miou(cls, model, sam_model, epoch, val_miou):
+    def save_model_dice(cls, model, sam_model, epoch, val_dice):
         # 同时保存 VRP_encoder 与微调后的 SAM（mask_decoder 等），否则测试会丢分
+        # SAM 只存微调组件（prompt_encoder/mask_decoder）；image_encoder 冻结不存，加载时用官方权重
+        sam_sd = sam_model.state_dict()
+        sam_finetuned = {k: v for k, v in sam_sd.items()
+                         if 'prompt_encoder' in k or 'mask_decoder' in k}
         ckpt = {'model': model.state_dict(),
-                'sam_model': sam_model.state_dict()}
+                'sam_model': sam_finetuned}
         torch.save(ckpt, os.path.join(cls.logpath, 'best_model.pt'))
-        cls.info('Model saved @%d w/ val. mIoU: %5.2f.\n' % (epoch, val_miou))
+        cls.info('Model saved @%d w/ val. Dice: %5.2f.\n' % (epoch, val_dice))
 
     @classmethod
     def log_params(cls, model):
