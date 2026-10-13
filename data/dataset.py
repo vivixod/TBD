@@ -54,7 +54,8 @@ class FSSDataset:
 
     @classmethod
     def build_dataloader(cls, benchmark, bsz, nworker, fold, split, shot=1,
-                         joint_subdatasets=None, n_episodes=None, sub_weights=None):
+                         joint_subdatasets=None, n_episodes=None, sub_weights=None,
+                         neighbor_prob=0.0):
         # Force randomness during training for diverse episode combinations
         # Freeze randomness during testing for reproducibility
         shuffle = split == 'trn'
@@ -69,9 +70,10 @@ class FSSDataset:
                 split=split, shot=shot, use_original_imgsize=cls.use_original_imgsize,
                 n_episodes=n_episodes if split == 'trn' else None,
                 sub_weights=sub_weights if split == 'trn' else None,
+                neighbor_prob=neighbor_prob,
             )
         else:
-            dataset = cls.datasets[benchmark](cls.datapath, fold=fold, transform=cls.transform, split=split, shot=shot, use_original_imgsize=cls.use_original_imgsize)
+            dataset = cls.datasets[benchmark](cls.datapath, fold=fold, transform=cls.transform, split=split, shot=shot, use_original_imgsize=cls.use_original_imgsize, neighbor_prob=neighbor_prob)
         # print(f"[DEBUG-dataset] build_dataloader: {benchmark} {split} shot={shot} "
         #       f"dataset构建完成 len={len(dataset)}", flush=True)
         if split == 'trn':

@@ -330,6 +330,8 @@ if __name__ == '__main__':
                         help='joint 训练每个 epoch 的 episode 总数（先按权重选数据集，再从该数据集随机抽样本）')
     parser.add_argument('--joint-weights', type=str, default='',
                         help='joint 各子数据集采样权重，逗号分隔（如 1,1,1,1）；留空则均匀。长度须等于子数据集数。')
+    parser.add_argument('--neighbor-prob', type=float, default=0.0,
+                        help='support 采样中同患者相邻切片占比（0=关闭；1.0=全部相邻，任务难度下界，诊断用）')
     parser.add_argument('--logpath', type=str, default='')
     parser.add_argument('--bsz', type=int, default=2) # batch size = num_gpu * bsz default num_gpu = 4
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -459,14 +461,16 @@ if __name__ == '__main__':
     # dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn')
     # dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val')
     dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn', shot=args.shot, joint_subdatasets=joint_sub,
-                                                 n_episodes=args.n_episodes, sub_weights=joint_weights)
+                                                 n_episodes=args.n_episodes, sub_weights=joint_weights,
+                                                 neighbor_prob=args.neighbor_prob)
 
     # joint 模式 val 按子数据集分别构造 DataLoader（每个子集单独出 mIoU，最后算 macro）
     if args.benchmark == 'joint':
         from data.joint import DatasetJoint as _DJ
-        val_loaders = _DJ.build_val_dataloaders(args.bsz, args.nworker, joint_sub, shot=args.shot)
+        val_loaders = _DJ.build_val_dataloaders(args.bsz, args.nworker, joint_sub, shot=args.shot,
+                                                neighbor_prob=args.neighbor_prob)
     else:
-        dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val', shot=args.shot, joint_subdatasets=joint_sub)
+        dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val', shot=args.shot, joint_subdatasets=joint_sub, neighbor_prob=args.neighbor_prob)
         val_loaders = None
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max= args.epochs * len(dataloader_trn))

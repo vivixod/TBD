@@ -10,7 +10,7 @@ from data.medical_base import MedicalDataset
 
 
 class DatasetAdam(MedicalDataset):
-    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
+    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize, neighbor_prob=0.0):
         super().__init__(
             datapath=datapath,
             fold=fold,
@@ -20,6 +20,7 @@ class DatasetAdam(MedicalDataset):
             use_original_imgsize=use_original_imgsize,
             name='adam',
             nclass=2,
+            neighbor_prob=neighbor_prob,
             # 实测（63 张抽样，灰度转 RGB）：
             img_mean=[0.116, 0.116, 0.116],
             img_std=[0.088, 0.088, 0.088],

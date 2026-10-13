@@ -57,6 +57,45 @@ def mr_augment(img_pil, mask_tensor, angle=10.0, trans=0.03, contrast=0.1,
     return Image.fromarray(img.astype(np.uint8)), torch.from_numpy(mask)
 
 
+# ===================== 同患者相邻切片 support 采样 =====================
+def parse_patient_slice(img_name):
+    r"""从 image_name 解析 (patient, slice_no)。
+
+    各数据集命名统一为 'x___<患者>_<切片号>'：
+      x___ABD_001_128                -> ('ABD_001', 128)
+      x___amos_0507_0                -> ('amos_0507', 0)
+      x___10027_26                   -> ('10027', 26)
+      x___HGG__BraTS19_2013_10_1_100 -> ('HGG__BraTS19_2013_10_1', 100)
+    """
+    clean = img_name.replace('x___', '')
+    if '_' not in clean:
+        return None, None
+    patient, slice_str = clean.rsplit('_', 1)
+    try:
+        slice_no = int(slice_str)
+    except ValueError:
+        return None, None
+    return patient, slice_no
+
+
+def build_patient_slice_index(metadata):
+    r"""按患者聚合切片。返回 ({patient: {slice_no: img_name}}, {patient: [sorted slice_no]})。
+
+    注意：切片号可能是 stride 采样后的原始索引（如 btcv），
+    “相邻”必须从排序列表中取邻居，而不是数值 ±1。
+    """
+    p2slices, p2order = {}, {}
+    for name in metadata:
+        patient, slice_no = parse_patient_slice(name)
+        if patient is None:
+            continue
+        p2slices.setdefault(patient, {})[slice_no] = name
+        p2order.setdefault(patient, []).append(slice_no)
+    for patient in p2order:
+        p2order[patient] = sorted(set(p2order[patient]))
+    return p2slices, p2order
+
+
 class MedicalDataset(Dataset):
     r"""通用医学 2D few-shot dataset（episode 协议与 data/amos.py 完全一致）。
 
@@ -69,7 +108,7 @@ class MedicalDataset(Dataset):
 
     def __init__(self, datapath, fold, transform, split, shot,
                  use_original_imgsize, name, nclass, img_mean, img_std,
-                 aug_params=None):
+                 aug_params=None, neighbor_prob=0.0):
         self.split_norm = 'val' if split in ['val', 'test'] else 'train'
         self.split = 'val' if split in ['val', 'test'] else 'trn'
         self.fold = fold
@@ -87,9 +126,16 @@ class MedicalDataset(Dataset):
         # 个性化增广参数（None 用默认）
         self.aug_params = aug_params or {}
 
+        # 相邻切片 support 采样比例（0=关闭；1.0=全部相邻，难度下界诊断用）
+        self.neighbor_prob = float(neighbor_prob)
+
         self.class_ids = self.build_class_ids()
         self.img_metadata = self.build_img_metadata()
         self.img_metadata_classwise = self.build_img_metadata_classwise()
+
+        # 同患者切片索引（相邻 support 采样用）
+        self._patient2slices, self._patient2order = \
+            build_patient_slice_index(self.img_metadata)
 
         # 类名（与 class_ids 对齐，val 打印 per-class 指标用）
         self.class_names = self._load_class_names()
@@ -246,16 +292,42 @@ class MedicalDataset(Dataset):
         else:
             class_sample = int(np.random.choice(valid_classes))
 
-        candidates = self.img_metadata_classwise.get(class_sample + 1, [])
+        # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
         support_names = []
+        if self.neighbor_prob > 0 and np.random.rand() < self.neighbor_prob:
+            support_names = self._sample_neighbor_supports(query_name, class_sample)
+
+        candidates = self.img_metadata_classwise.get(class_sample + 1, [])
         while len(support_names) < self.shot:
             if len(candidates) == 0:
-                support_name = query_name
+                support_names.append(query_name)
+            elif len(set(candidates)) <= 1 and candidates[0] in support_names:
+                # 同类候选只有 1 个且已被相邻逻辑选中：允许重复以凑满 shot
+                support_names.append(candidates[0])
             else:
                 support_name = np.random.choice(candidates)
-            if query_name != support_name or len(candidates) <= 1:
-                support_names.append(support_name)
+                if support_name not in support_names:
+                    support_names.append(support_name)
         return query_name, support_names, class_sample
+
+    def _sample_neighbor_supports(self, query_name, class_sample):
+        r"""从 query 同患者相邻切片（排序列表 ±3 窗口）选含该类的切片做 support。"""
+        patient, slice_no = parse_patient_slice(query_name)
+        if patient is None:
+            return []
+        order = self._patient2order.get(patient)
+        if not order or slice_no not in order:
+            return []
+        pos = order.index(slice_no)
+        cand_nos = [order[i] for i in range(max(0, pos - 6), min(len(order), pos + 7))
+                    if i != pos]
+        cand_names = [self._patient2slices[patient][n] for n in cand_nos]
+        valid = [n for n in cand_names
+                 if (class_sample + 1) in self._label_classes(n)]
+        if not valid:
+            return []
+        k = min(self.shot, len(valid))
+        return list(np.random.choice(valid, size=k, replace=False))
 
     def build_class_ids(self):
         return list(range(self.nclass))

@@ -10,7 +10,7 @@ from data.medical_base import MedicalDataset
 
 
 class DatasetBraTS(MedicalDataset):
-    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
+    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize, neighbor_prob=0.0):
         super().__init__(
             datapath=datapath,
             fold=fold,
@@ -20,6 +20,7 @@ class DatasetBraTS(MedicalDataset):
             use_original_imgsize=use_original_imgsize,
             name='brats',
             nclass=3,
+            neighbor_prob=neighbor_prob,
             # 实测（61 张抽样，灰度转 RGB）：
             img_mean=[0.100, 0.100, 0.100],
             img_std=[0.188, 0.188, 0.188],

@@ -12,7 +12,8 @@ echo "Using free port: $FREE_PORT"
 JOINT_SUBDATASETS="btcv2:/vcl/2025zhutaotao/BTCV,amos:/vcl/2025zhutaotao/AMOS2022_MR,adam:/vcl/2025zhutaotao/ADAM2020,brats:/vcl/2025zhutaotao/BraTS2019"
 
 # 采样权重（长度=数据集数，逗号分隔；留空则均匀）
-JOINT_WEIGHTS="1,1,1,1"
+# 非均匀：adam 小体量难任务高权重、brats 次之（学 MASS 数据集级加权思路）
+JOINT_WEIGHTS="1,1,2,1.5"
 
 CUDA_VISIBLE_DEVICES=${GPU_ID} python3 -m torch.distributed.launch \
         --nproc_per_node=3 \
@@ -21,9 +22,10 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} python3 -m torch.distributed.launch \
         --benchmark joint \
         --joint-subdatasets "${JOINT_SUBDATASETS}" \
         --joint-weights "${JOINT_WEIGHTS}" \
-        --n-episodes 4000 \
+        --n-episodes 8000 \
+        --neighbor-prob 1.0 \
         --datapath /vcl/2025zhutaotao/BTCV \
-        --logpath trn_joint4_shot8 \
+        --logpath trn_joint4_shot8_w \
         --backbone resnet50 \
         --shot 8 \
         --fold 0 \

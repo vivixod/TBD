@@ -7,6 +7,8 @@ import PIL.Image as Image
 import numpy as np
 import cv2
 
+from data.medical_base import parse_patient_slice, build_patient_slice_index
+
 
 def joint_augment(img_pil, mask_tensor):
     """腹部 CT 多器官分割的训练增强。
@@ -65,7 +67,7 @@ class DatasetBTCV(Dataset):
     BTCV_CLASS_NAMES = ['spleen', 'right_kidney', 'left_kidney', 'gallbladder',
                         'esophagus', 'liver', 'stomach', 'aorta', 'IVC',
                         'portal_vein', 'pancreas', 'right_adrenal', 'left_adrenal']
-    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
+    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize, neighbor_prob=0.0):
         # 规范化 split 命名，对齐 PASCAL 的习惯
         self.split = 'val' if split in ['val', 'test'] else 'trn'
         self.fold = fold
@@ -75,6 +77,7 @@ class DatasetBTCV(Dataset):
         self.benchmark = 'btcv'
         self.shot = shot
         self.use_original_imgsize = use_original_imgsize
+        self.neighbor_prob = float(neighbor_prob)  # 旧 fold 协议类：接受参数但未实现相邻采样
         # 你的数据实体路径
         self.img_path = os.path.join(datapath, 'image')
         self.ann_path = os.path.join(datapath, 'mask')
@@ -276,7 +279,7 @@ class DatasetBTCV2(Dataset):
     BTCV_CLASS_NAMES = ['spleen', 'right_kidney', 'left_kidney', 'gallbladder',
                         'esophagus', 'liver', 'stomach', 'aorta', 'IVC',
                         'portal_vein', 'pancreas', 'right_adrenal', 'left_adrenal']
-    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
+    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize, neighbor_prob=0.0):
         # 规范化 split 命名，对齐 PASCAL 的习惯
         self.split = 'val' if split in ['val', 'test'] else 'trn'
         self.fold = fold
@@ -286,6 +289,8 @@ class DatasetBTCV2(Dataset):
         self.benchmark = 'btcv2'
         self.shot = shot
         self.use_original_imgsize = use_original_imgsize
+        # 相邻切片 support 采样比例（0=关闭；1.0=全部相邻）
+        self.neighbor_prob = float(neighbor_prob)
 
         # 你的数据实体路径
         self.img_path = os.path.join(datapath, 'image')
@@ -300,6 +305,17 @@ class DatasetBTCV2(Dataset):
         # 构建情景训练的“双重索引库”
         self.img_metadata = self.build_img_metadata()
         self.img_metadata_classwise = self.build_img_metadata_classwise()
+
+        # 同患者切片索引（相邻 support 采样用）+ 掩码类缓存
+        self._patient2slices, self._patient2order = \
+            build_patient_slice_index(self.img_metadata)
+        self._label_classes_cache = {}
+
+    def _label_classes(self, img_name):
+        r"""返回某张图包含的器官像素值列表（带缓存）。"""
+        if img_name not in self._label_classes_cache:
+            self._label_classes_cache[img_name] = self.read_mask(img_name).unique().tolist()
+        return self._label_classes_cache[img_name]
 
     def __len__(self):
         # 训练时按实际切片数，验证时仿照 PASCAL 固定测试 1000 个 Episode
@@ -398,7 +414,7 @@ class DatasetBTCV2(Dataset):
         query_name = self.img_metadata[idx]
         
         # 获取 Query 图里包含的所有器官真实像素值 (1-13)
-        label_class = self.read_mask(query_name).unique().tolist()
+        label_class = self._label_classes(query_name)
         if 0 in label_class:
             label_class.remove(0) # 剔除背景
             
@@ -412,31 +428,47 @@ class DatasetBTCV2(Dataset):
             class_sample = self.class_ids[0]
         else:
             class_sample = np.random.choice(valid_classes)
-            
+
+        # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
         support_names = []
+        if self.neighbor_prob > 0 and np.random.rand() < self.neighbor_prob:
+            support_names = self._sample_neighbor_supports(query_name, class_sample)
+            
         # 【关键修复】去 txt 字典抽样时，要把 0-12 的 ID 加 1 变回 1-13 的真实像素值
         candidates = self.img_metadata_classwise.get(class_sample + 1, [])
-        # _dbg(f"[DEBUG-btcv2] sample_episode: idx={idx} query={query_name} "
-        #      f"class={class_sample} n_candidates={len(candidates)} shot={self.shot}")
         loop_iter = 0
-        while True:
+        while len(support_names) < self.shot:
             loop_iter += 1
             if len(candidates) == 0:
-                support_name = query_name # 极端兜底：没有同类图，用自己
+                support_names.append(query_name)
+            elif len(set(candidates)) <= 1 and candidates[0] in support_names:
+                # 同类候选只有 1 个且已被相邻逻辑选中：允许重复以凑满 shot
+                support_names.append(candidates[0])
             else:
-                # 换回 np.random，恢复修改前的采样序列
                 support_name = np.random.choice(candidates)
-            # if loop_iter <= 3:
-            #     _dbg(f"[DEBUG-btcv2] while iter={loop_iter} 选中={support_name} "
-            #          f"已收集={len(support_names)}")
-                
-            # 修复：candidates 为空时也必须 append，否则死循环
-            if query_name != support_name or len(candidates) <= 1: 
-                support_names.append(support_name)
-            if len(support_names) == self.shot: 
-                break
+                if support_name not in support_names:
+                    support_names.append(support_name)
 
         return query_name, support_names, class_sample
+
+    def _sample_neighbor_supports(self, query_name, class_sample):
+        r"""从 query 同患者相邻切片（排序列表 ±3 窗口）选含该类的切片做 support。"""
+        patient, slice_no = parse_patient_slice(query_name)
+        if patient is None:
+            return []
+        order = self._patient2order.get(patient)
+        if not order or slice_no not in order:
+            return []
+        pos = order.index(slice_no)
+        cand_nos = [order[i] for i in range(max(0, pos - 6), min(len(order), pos + 7))
+                    if i != pos]
+        cand_names = [self._patient2slices[patient][n] for n in cand_nos]
+        valid = [n for n in cand_names
+                 if (class_sample + 1) in self._label_classes(n)]
+        if not valid:
+            return []
+        k = min(self.shot, len(valid))
+        return list(np.random.choice(valid, size=k, replace=False))
 
     def build_class_ids(self):
         # 直接返回所有类别，不再按 fold/split 划分

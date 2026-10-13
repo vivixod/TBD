@@ -42,7 +42,7 @@ class DatasetJoint(Dataset):
     def __init__(self, fold, transform, split, shot,
                  use_original_imgsize,
                  sub_datasets_config=None, joint_subdatasets=None,
-                 n_episodes=None, sub_weights=None):
+                 n_episodes=None, sub_weights=None, neighbor_prob=0.0):
         """
         Args:
             sub_datasets_config (or joint_subdatasets):
@@ -77,6 +77,7 @@ class DatasetJoint(Dataset):
                 split=split,
                 shot=shot,
                 use_original_imgsize=use_original_imgsize,
+                neighbor_prob=neighbor_prob,
             )
             self.sub_datasets.append(ds)
 
@@ -172,7 +173,7 @@ class DatasetJoint(Dataset):
             use_original_imgsize=use_original_imgsize,
         )
     @classmethod
-    def build_val_dataloaders(cls, bsz, nworker, joint_subdatasets, shot=1):
+    def build_val_dataloaders(cls, bsz, nworker, joint_subdatasets, shot=1, neighbor_prob=0.0):
         r""" 验证阶段按子数据集分别出 val DataLoader。
 
         返回 OrderedDict[(name, datapath)] -> DataLoader，
@@ -203,6 +204,7 @@ class DatasetJoint(Dataset):
                 split='val',
                 shot=shot,
                 use_original_imgsize=FSSDataset.use_original_imgsize,
+                neighbor_prob=neighbor_prob,
             )
             sampler = None
             try:

@@ -16,6 +16,8 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset
 import cv2
 
+from data.medical_base import parse_patient_slice, build_patient_slice_index
+
 
 # ===================== AMOS MR 友好增广 =====================
 def amos_augment(img_pil, mask_tensor):
@@ -79,7 +81,7 @@ class DatasetAMOS(Dataset):
     稀有类（膀胱/前列腺）固定 1 患者进 val（生成脚本 data/splits/gen_splits.py）。
     """
 
-    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize):
+    def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize, neighbor_prob=0.0):
         # 规范化 split：'trn' -> 'train'，'val'/'test' -> 'val'（对齐 btcv.py）
         self.split_norm = 'val' if split in ['val', 'test'] else 'train'
         self.split = 'val' if split in ['val', 'test'] else 'trn'
@@ -100,6 +102,13 @@ class DatasetAMOS(Dataset):
         self.class_ids = self.build_class_ids()
         self.img_metadata = self.build_img_metadata()
         self.img_metadata_classwise = self.build_img_metadata_classwise()
+
+        # 相邻切片 support 采样比例（0=关闭；1.0=全部相邻）
+        self.neighbor_prob = float(neighbor_prob)
+
+        # 同患者切片索引（相邻 support 采样用）
+        self._patient2slices, self._patient2order = \
+            build_patient_slice_index(self.img_metadata)
 
         # 类名（与 class_ids 对齐，val 打印 per-class 指标用）
         import json as _json
@@ -266,21 +275,45 @@ class DatasetAMOS(Dataset):
         else:
             class_sample = int(np.random.choice(valid_classes))
 
+        # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
+        support_names = []
+        if self.neighbor_prob > 0 and np.random.rand() < self.neighbor_prob:
+            support_names = self._sample_neighbor_supports(query_name, class_sample)
+
         # 抽 K 张 support（同类器官）
         candidates = self.img_metadata_classwise.get(class_sample + 1, [])
-        support_names = []
         loop_iter = 0
-        while True:
+        while len(support_names) < self.shot:
             loop_iter += 1
             if len(candidates) == 0:
-                support_name = query_name
+                support_names.append(query_name)
+            elif len(set(candidates)) <= 1 and candidates[0] in support_names:
+                # 同类候选只有 1 个且已被相邻逻辑选中：允许重复以凑满 shot
+                support_names.append(candidates[0])
             else:
                 support_name = np.random.choice(candidates)
-            if query_name != support_name or len(candidates) <= 1:
-                support_names.append(support_name)
-            if len(support_names) == self.shot:
-                break
+                if support_name not in support_names:
+                    support_names.append(support_name)
         return query_name, support_names, class_sample
+
+    def _sample_neighbor_supports(self, query_name, class_sample):
+        r"""从 query 同患者相邻切片（排序列表 ±3 窗口）选含该类的切片做 support。"""
+        patient, slice_no = parse_patient_slice(query_name)
+        if patient is None:
+            return []
+        order = self._patient2order.get(patient)
+        if not order or slice_no not in order:
+            return []
+        pos = order.index(slice_no)
+        cand_nos = [order[i] for i in range(max(0, pos - 6), min(len(order), pos + 7))
+                    if i != pos]
+        cand_names = [self._patient2slices[patient][n] for n in cand_nos]
+        valid = [n for n in cand_names
+                 if (class_sample + 1) in self._label_classes(n)]
+        if not valid:
+            return []
+        k = min(self.shot, len(valid))
+        return list(np.random.choice(valid, size=k, replace=False))
 
     def build_class_ids(self):
         # AMOS 不分 fold 类，全 15 类都参与训练+验证
