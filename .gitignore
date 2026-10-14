@@ -1,5 +1,6 @@
 # ===== 大数据 / 缓存（绝不提交）=====
 cache_features/
+cache_features
 logs/
 weights/
 RawData/

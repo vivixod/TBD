@@ -25,9 +25,9 @@ from collections import defaultdict
 import numpy as np
 
 DATASETS = {
-    'adam': '/vcl/2025zhutaotao/ADAM2020',
-    'amos': '/vcl/2025zhutaotao/AMOS2022_MR',
-    'brats': '/vcl/2025zhutaotao/BraTS2019',
+    'adam': '/data/2025Zhutaotao/ADAM2020',
+    'amos': '/data/2025Zhutaotao/AMOS2022_MR',
+    'brats': '/data/2025Zhutaotao/BraTS2019',
 }
 
 OUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lists')

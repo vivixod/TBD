@@ -182,7 +182,7 @@ class VRP_encoder(nn.Module):
             convnext = timm.create_model('convnext_tiny', pretrained=False)
             
             # 2. 加载你的本地权重文件
-            model_path = '/vcl/2025zhutaotao/LanGuideMedSeg-ysm/lib/convnext-tiny-224/pytorch_model.bin'
+            model_path = '/data/2025Zhutaotao/LanGuideMedSeg-MICCAI2023/lib/convnext-tiny-224/pytorch_model.bin'
             checkpoint = torch.load(model_path, map_location='cpu')
             
             # 兼容处理：检查权重是存在字典的最外层还是 'model'/'state_dict' 键中
@@ -208,7 +208,7 @@ class VRP_encoder(nn.Module):
             resnet = models.resnet50(pretrained=False)
             
             # 2. 读取 RadImageNet 本地权重
-            rad_weight_path = '/vcl/2025zhutaotao/VRP-SAM/weights/ResNet50.pt'
+            rad_weight_path = '/data/2025Zhutaotao/TBD/weights/ResNet50.pt'
             checkpoint = torch.load(rad_weight_path, map_location='cpu')
             
             # 3. 权重字典清洗 

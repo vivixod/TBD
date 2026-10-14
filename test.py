@@ -41,8 +41,8 @@ def test(args, model, sam_model, dataloader):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test on Spleen with Pretrained Liver Model')
     # 路径配置
-    parser.add_argument('--datapath', type=str, default='/vcl/2025zhutaotao/BTCV')
-    parser.add_argument('--load', type=str, default='/vcl/2025zhutaotao/VRP-SAM/logs/trn_btcv_elcseg_bbox_aug2.log/best_model.pt', help='Path to best_model.pt')
+    parser.add_argument('--datapath', type=str, default='/data/2025Zhutaotao/BTCV')
+    parser.add_argument('--load', type=str, default='', help='Path to best_model.pt')
     parser.add_argument('--benchmark', type=str, default='btcv2')
     parser.add_argument('--bsz', type=int, default=1) # 测试建议用 1，方便观察结果
     parser.add_argument('--nworker', type=int, default=4)

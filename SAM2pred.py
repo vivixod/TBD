@@ -9,7 +9,8 @@ class  SAM_pred(nn.Module):
     def __init__(self, ):
         super().__init__()
         # self.sam_model = sam_model_registry['vit_h']('/root/paddlejob/workspace/env_run/vrp_sam/sam_vit_h_4b8939.pth')
-        self.sam_model = sam_model_registry['vit_h']('/vcl/2025zhutaotao/VRP-SAM/weights/sam_vit_h_4b8939.pth')
+        _ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weights', 'sam_vit_h_4b8939.pth')
+        self.sam_model = sam_model_registry['vit_h'](_ckpt)
         
         for param in self.sam_model.image_encoder.parameters():
             param.requires_grad = False
@@ -62,7 +63,8 @@ class  SAM_pred(nn.Module):
     #     return query_feats_np
     
     def get_feat_from_np(self, query_img, query_name, protos):
-        np_feat_path = os.path.join('/vcl/2025zhutaotao/VRP-SAM', 'cache_features')
+        # 特征缓存放 /data2（/data 磁盘紧张），可用 TBD_FEATS 环境变量覆盖
+        np_feat_path = os.environ.get('TBD_FEATS', '/data2/2025Zhutaotao/TBD/cache_features')
         if not os.path.exists(np_feat_path): 
             os.makedirs(np_feat_path)
             
