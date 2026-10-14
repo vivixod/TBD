@@ -5,6 +5,11 @@ PARTITION=Segmentation
 
 GPU_ID=0,1,2
 # GPU_ID=4,5,6,7
+# auto: 支持原生 BF16 时加速冻结的 SAM 编码器；可用环境变量改为 fp32 做对照。
+SAM_ENCODER_PRECISION=${SAM_ENCODER_PRECISION:-auto}
+# 0=原采样；0.5=一半先选器官再选 query；1=全部类别均衡。
+CLASS_BALANCE_PROB=${CLASS_BALANCE_PROB:-0.5}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-trn_joint4_shot4_cb${CLASS_BALANCE_PROB}}
 FREE_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 echo "Using free port: $FREE_PORT"
 
@@ -24,13 +29,15 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} python3 -m torch.distributed.launch \
         --joint-weights "${JOINT_WEIGHTS}" \
         --n-episodes 8000 \
         --neighbor-prob 1.0 \
+        --class-balance-prob "${CLASS_BALANCE_PROB}" \
         --datapath /data/2025Zhutaotao/BTCV \
-        --logpath trn_joint4_shot8_w \
+        --logpath "${EXPERIMENT_NAME}" \
         --backbone resnet50 \
-        --shot 8 \
+        --shot 4 \
         --fold 0 \
         --condition mask \
         --num_query 50 \
         --epochs 300 \
+        --sam-encoder-precision "${SAM_ENCODER_PRECISION}" \
         --lr 1e-4 \
         --bsz 1

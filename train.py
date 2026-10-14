@@ -26,6 +26,7 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
 
     utils.fix_randseed(args.seed + epoch) if training else utils.fix_randseed(args.seed)
     model.module.train_mode() if training else model.module.eval()
+    sam_model.train(training)  # train: 在线编码增强图；eval: 使用未增强图的独立缓存
     average_meter = AverageMeter(dataloader.dataset)
     bbox_cos_buf = []   # 每 batch 的 bbox token cos 相似度，epoch 末打印均值
 
@@ -162,7 +163,6 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
             # 2. 复制 Query 以对齐并行数量 (必须用 repeat_interleave 保证顺序不乱)
             q_imgs_dummy = batch['query_img'].repeat_interleave(S, dim=0)
             # print(f"Debug: q_imgs_dummy shape after repeat_interleave: {q_imgs_dummy.shape}")  # [B*S, C, H, W]
-            q_names_dummy = [name for name in batch['query_name'] for _ in range(S)]  # 将名称重复 S 次
 
             # 3. 此时所有输入都是标准的 4D 张量，送入模型
             p_all, bbox_token, _ = model(args.condition, q_imgs_dummy, supp_imgs_flat, supp_masks_flat, training)
@@ -178,7 +178,8 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
             bbox_cos_buf.append(cos_sim.item())
 
             # 4. 调用 SAM 模型（不传 coarse_mask —— cascaded post-refinement 撤掉，结论：负效果）
-            logit_mask, _ = sam_model(q_imgs_dummy, q_names_dummy, protos_all)
+            logit_mask, _ = sam_model(batch['query_img'], batch['query_name'],
+                                     protos_all, image_repeats=S)
 
             logit_mask = logit_mask.view(B, S, H, W)   # [B, S, H, W]
             logit_mask = logit_mask.mean(dim=1)           # [B, H, W]  简单平均即可
@@ -205,7 +206,6 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
                 # 2. 复制 Query 以对齐并行数量 (必须用 repeat_interleave 保证顺序不乱)
                 q_imgs_dummy = batch['query_img'].repeat_interleave(S, dim=0)
                 # print(f"Debug: q_imgs_dummy shape after repeat_interleave: {q_imgs_dummy.shape}")  # [B*S, C, H, W]
-                q_names_dummy = [name for name in batch['query_name'] for _ in range(S)]  # 将名称重复 S 次
 
                 # 3. 此时所有输入都是标准的 4D 张量，送入模型
                 p_all, bbox_token, _ = model(args.condition, q_imgs_dummy, supp_imgs_flat, supp_masks_flat, training)
@@ -219,7 +219,8 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
                 bbox_cos_buf.append(cos_sim.item())
 
                 # 4. 调用 SAM 模型（不传 coarse_mask —— cascaded post-refinement 撤掉，结论：负效果）
-                logit_mask, _ = sam_model(q_imgs_dummy, q_names_dummy, protos_all)
+                logit_mask, _ = sam_model(batch['query_img'], batch['query_name'],
+                                         protos_all, image_repeats=S)
 
                 logit_mask = logit_mask.view(B, S, H, W)   # [B, S, H, W]
                 logit_mask = logit_mask.mean(dim=1)           # [B, H, W]  简单平均即可
@@ -332,6 +333,9 @@ if __name__ == '__main__':
                         help='joint 各子数据集采样权重，逗号分隔（如 1,1,1,1）；留空则均匀。长度须等于子数据集数。')
     parser.add_argument('--neighbor-prob', type=float, default=0.0,
                         help='support 采样中同患者相邻切片占比（0=关闭；1.0=全部相邻，任务难度下界，诊断用）')
+    parser.add_argument('--class-balance-prob', type=float, default=0.0,
+                        help='Training-only probability of class-first query sampling: '
+                             '0=original, 0.5=mixed, 1=uniform classes. Validation is unchanged.')
     parser.add_argument('--logpath', type=str, default='')
     parser.add_argument('--bsz', type=int, default=2) # batch size = num_gpu * bsz default num_gpu = 4
     parser.add_argument('--lr', type=float, default=1e-4)
@@ -348,7 +352,13 @@ if __name__ == '__main__':
     parser.add_argument('--shot', type=int, default=2)
     parser.add_argument('--bbox_loss_weight', type=float, default=0.5,
                         help='weight of the bbox token MSE loss (token-space supervision). 0 disables it.')
+    parser.add_argument('--sam-encoder-precision', choices=['auto', 'fp32', 'bf16', 'fp16'],
+                        default='auto',
+                        help='Frozen SAM image encoder training precision: auto uses native BF16 '
+                             'when supported, otherwise FP32. Validation always uses FP32.')
     args = parser.parse_args()
+    if not 0.0 <= args.class_balance_prob <= 1.0:
+        parser.error('--class-balance-prob must be between 0 and 1')
     # Distributed setting
     local_rank = args.local_rank
     
@@ -370,7 +380,17 @@ if __name__ == '__main__':
     if utils.is_main_process():
         Logger.log_params(model)
 
-    sam_model = SAM_pred()
+    sam_model = SAM_pred(encoder_precision=args.sam_encoder_precision)
+    if utils.is_main_process():
+        eval_cache = os.path.join(
+            os.environ.get('TBD_FEATS', '/data2/2025Zhutaotao/TBD/cache_features'),
+            'eval_unaugmented_v1',
+        )
+        Logger.info(f'[SAM cache] train=online (augmented query), '
+                    f'eval={eval_cache}, image encoder frozen, shared across shots')
+        Logger.info(f'[Speed] SAM encoder train={sam_model.resolve_encoder_precision(device)} '
+                    f'(requested={args.sam_encoder_precision}), eval=fp32; '
+                    f'decoder/loss=fp32, unused layer4 skipped, attention need_weights=False')
     sam_model.to(device)
     model.to(device)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -387,7 +407,7 @@ if __name__ == '__main__':
     for param in model.module.layer3.parameters():
         param.requires_grad = True
     for param in model.module.layer4.parameters():
-        param.requires_grad = True
+        param.requires_grad = False
         
     # 收集所有需要优化的参数组
     param_groups = []
@@ -397,9 +417,8 @@ if __name__ == '__main__':
     param_groups.append({'params': model.module.downsample_query.parameters(), 'lr': args.lr})
     param_groups.append({'params': model.module.merge_1.parameters(), 'lr': args.lr})
 
-    # 2. 微调 backbone 最后两层（低学习率）
+    # 2. 微调参与预测的 layer3（低学习率）；layer4 仅保留供旧 checkpoint 加载
     param_groups.append({'params': model.module.layer3.parameters(), 'lr': args.lr * 0.01})
-    param_groups.append({'params': model.module.layer4.parameters(), 'lr': args.lr * 0.01})
 
     # 3. SAM 模块（较低学习率）
     param_groups.append({'params': sam_model.module.parameters(), 'lr': args.lr * 0.1})
@@ -462,7 +481,18 @@ if __name__ == '__main__':
     # dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val')
     dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn', shot=args.shot, joint_subdatasets=joint_sub,
                                                  n_episodes=args.n_episodes, sub_weights=joint_weights,
-                                                 neighbor_prob=args.neighbor_prob)
+                                                 neighbor_prob=args.neighbor_prob,
+                                                 class_balance_prob=args.class_balance_prob)
+    if utils.is_main_process():
+        datasets = getattr(dataloader_trn.dataset, 'sub_datasets', [dataloader_trn.dataset])
+        for ds in datasets:
+            available = getattr(ds, 'balanced_class_ids', ())
+            names = {c: name for c, name in zip(ds.class_ids, getattr(ds, 'class_names', []))}
+            pools = getattr(ds, 'class_query_pools', {})
+            pool_sizes = ', '.join(f'{names.get(c, c)}={len(pools[c])}' for c in available)
+            Logger.info(f'[Sampling] {ds.benchmark}: class-first probability='
+                        f'{getattr(ds, "class_balance_prob", 0.0):.2f}, '
+                        f'query pools: {pool_sizes or "original query-first"}; validation unchanged')
 
     # joint 模式 val 按子数据集分别构造 DataLoader（每个子集单独出 mIoU，最后算 macro）
     if args.benchmark == 'joint':

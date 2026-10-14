@@ -17,6 +17,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 import cv2
+from data.episode_sampling import ClassBalancedQueryMixin
 
 
 # ===================== MR 友好增广（无 CT 窗位假设） =====================
@@ -96,7 +97,7 @@ def build_patient_slice_index(metadata):
     return p2slices, p2order
 
 
-class MedicalDataset(Dataset):
+class MedicalDataset(ClassBalancedQueryMixin, Dataset):
     r"""通用医学 2D few-shot dataset（episode 协议与 data/amos.py 完全一致）。
 
     数据布局（datapath 下）：
@@ -281,16 +282,16 @@ class MedicalDataset(Dataset):
         return self._label_classes_cache[img_name]
 
     def sample_episode(self, idx):
-        query_name = self.img_metadata[idx]
-        label_class = self._label_classes(query_name)
-        if 0 in label_class:
-            label_class.remove(0)
-        label_class_0 = [c - 1 for c in label_class]
-        valid_classes = [c for c in label_class_0 if c in self.class_ids]
-        if len(valid_classes) == 0:
-            class_sample = self.class_ids[0]
+        balanced = self.sample_class_balanced_query()
+        if balanced is not None:
+            query_name, class_sample = balanced
         else:
-            class_sample = int(np.random.choice(valid_classes))
+            query_name = self.img_metadata[idx]
+            label_class = self._label_classes(query_name)
+            if 0 in label_class:
+                label_class.remove(0)
+            valid_classes = [c - 1 for c in label_class if c - 1 in self.class_ids]
+            class_sample = int(np.random.choice(valid_classes)) if valid_classes else self.class_ids[0]
 
         # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
         support_names = []
@@ -304,6 +305,8 @@ class MedicalDataset(Dataset):
             elif len(set(candidates)) <= 1 and candidates[0] in support_names:
                 # 同类候选只有 1 个且已被相邻逻辑选中：允许重复以凑满 shot
                 support_names.append(candidates[0])
+            elif set(candidates).issubset(support_names):
+                support_names.append(np.random.choice(candidates))
             else:
                 support_name = np.random.choice(candidates)
                 if support_name not in support_names:

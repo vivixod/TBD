@@ -45,6 +45,53 @@ python -m torch.distributed.launch --nproc_per_node=1 train.py \
     --num_query 50 --epochs 300 --lr 1e-4 --bsz 1
 ```
 
+SAM 特征与 query 增强保持一致：训练时在线编码增强后的 query，同一 query 的多张
+support 共用一次图像编码；验证/测试在 `eval()` 模式下缓存未增强图像特征。
+新验证缓存位于 `${TBD_FEATS:-/data2/2025Zhutaotao/TBD/cache_features}/eval_unaugmented_v1/`，
+首次验证会生成缓存，后续复用；旧目录根部的历史缓存不再读取。
+训练/验证入口会设置 SAM 的 `train()`/`eval()` 模式，图像编码器始终冻结。
+
+训练加速：`--sam-encoder-precision auto`（默认）在支持原生 BF16 的 GPU 上对冻结的
+SAM 图像编码器使用 BF16，其他 GPU 回退到 FP32；输出特征转换回 FP32，prompt/decoder、
+损失和验证缓存都保持 FP32。`layer4` 不参与当前预测，已跳过其前向并冻结参数，但保留
+checkpoint 中的参数结构；context/bbox attention 不再输出未使用的注意力权重。
+完整验证仍然每轮执行，episode 数量、shot、batch size 和学习率设置不变。
+
+类别均衡采样：`train_joint.sh` 默认 `CLASS_BALANCE_PROB=0.5`，四个子数据集内部
+各有 50% 的训练 episodes 先均匀选一个有 query 候选的类别，再从本训练 split 内
+含该类的切片中选 query；其余沿用 query-first 采样。support 继续按原有相邻/同类
+策略选取。四数据集权重不变，验证采样和频率不变。稀有类候选不足 shot 时允许重复
+填充，避免无限循环。启动日志的 `[Sampling]` 会列出均衡概率和每类 query 池大小。
+
+`CLASS_BALANCE_PROB=0` 关闭均衡，`1` 使用纯类别均衡；直接运行 `train.py` 时通过
+`--class-balance-prob` 指定（默认 0，保持旧命令行为）。新日志默认使用
+`trn_joint4_shot4_cb0.5.log` 前缀，可用 `EXPERIMENT_NAME` 覆盖。
+
+启动与精度对照：
+
+```bash
+bash train_joint.sh
+SAM_ENCODER_PRECISION=fp32 bash train_joint.sh
+CLASS_BALANCE_PROB=0 bash train_joint.sh
+CLASS_BALANCE_PROB=1 bash train_joint.sh
+```
+
+在空闲 GPU 上测 SAM 编码器的实际速度（不训练、不写缓存）：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python benchmark_sam_encoder.py --steps 20 --warmup 5
+```
+
+编码器测速结果不等于完整训练提速比例，完整耗时以训练日志/TensorBoard 为准。
+
+CPU 回归检查（使用项目 Python 环境，无需加载 SAM 权重）：
+
+```bash
+python tests/test_sam_cache_alignment.py -v
+python tests/test_training_speedups.py -v
+python tests/test_class_balanced_sampling.py -v
+```
+
 单数据集训练：
 
 ```bash

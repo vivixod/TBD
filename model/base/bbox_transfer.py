@@ -123,7 +123,7 @@ class BboxTransferModule(nn.Module):
 
         for i in range(self.num_layers):
             # cross-attention
-            attn_out, _ = cross_attn[i](query, k, v)
+            attn_out, _ = cross_attn[i](query, k, v, need_weights=False)
             query = query + dropout(attn_out)
             query = norm[i](query)
             # FFN

@@ -27,6 +27,7 @@ episode 池内部完全独立（support/query 不会跨数据集）。设计通�
 import os
 import numpy as np
 from torch.utils.data import Dataset
+from data.episode_sampling import configure_class_balance
 
 # 避免循环 import：FSSDataset 仅在方法内部延迟导入
 # （FSSDataset.datasets 也在方法内通过 'data.dataset.FSSDataset' 路径访问）
@@ -42,7 +43,8 @@ class DatasetJoint(Dataset):
     def __init__(self, fold, transform, split, shot,
                  use_original_imgsize,
                  sub_datasets_config=None, joint_subdatasets=None,
-                 n_episodes=None, sub_weights=None, neighbor_prob=0.0):
+                 n_episodes=None, sub_weights=None, neighbor_prob=0.0,
+                 class_balance_prob=0.0):
         """
         Args:
             sub_datasets_config (or joint_subdatasets):
@@ -79,6 +81,7 @@ class DatasetJoint(Dataset):
                 use_original_imgsize=use_original_imgsize,
                 neighbor_prob=neighbor_prob,
             )
+            configure_class_balance(ds, class_balance_prob if split == 'trn' else 0.0)
             self.sub_datasets.append(ds)
 
         self.n_sub = len(self.sub_datasets)

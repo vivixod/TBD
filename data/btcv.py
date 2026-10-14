@@ -8,6 +8,7 @@ import numpy as np
 import cv2
 
 from data.medical_base import parse_patient_slice, build_patient_slice_index
+from data.episode_sampling import ClassBalancedQueryMixin
 
 
 def joint_augment(img_pil, mask_tensor):
@@ -275,7 +276,7 @@ class DatasetBTCV(Dataset):
 
 
 
-class DatasetBTCV2(Dataset):
+class DatasetBTCV2(ClassBalancedQueryMixin, Dataset):
     BTCV_CLASS_NAMES = ['spleen', 'right_kidney', 'left_kidney', 'gallbladder',
                         'esophagus', 'liver', 'stomach', 'aorta', 'IVC',
                         'portal_vein', 'pancreas', 'right_adrenal', 'left_adrenal']
@@ -411,23 +412,17 @@ class DatasetBTCV2(Dataset):
         return Image.open(real_img_path).convert('RGB')
 
     def sample_episode(self, idx):
-        query_name = self.img_metadata[idx]
-        
-        # 获取 Query 图里包含的所有器官真实像素值 (1-13)
-        label_class = self._label_classes(query_name)
-        if 0 in label_class:
-            label_class.remove(0) # 剔除背景
-            
-        # 【关键修复】将像素值 (1-13) 平移成网络用的类别 ID (0-12)
-        label_class_0_indexed = [c - 1 for c in label_class]
-        
-        # 过滤出只属于当前 Split 的类别
-        valid_classes = [c for c in label_class_0_indexed if c in self.class_ids]
-        
-        if len(valid_classes) == 0:
-            class_sample = self.class_ids[0]
+        balanced = self.sample_class_balanced_query()
+        if balanced is not None:
+            query_name, class_sample = balanced
         else:
-            class_sample = np.random.choice(valid_classes)
+            # 原 query-first 分支；禁用均衡时不增加随机数调用，保持验证序列。
+            query_name = self.img_metadata[idx]
+            label_class = self._label_classes(query_name)
+            if 0 in label_class:
+                label_class.remove(0)
+            valid_classes = [c - 1 for c in label_class if c - 1 in self.class_ids]
+            class_sample = np.random.choice(valid_classes) if valid_classes else self.class_ids[0]
 
         # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
         support_names = []
@@ -444,6 +439,9 @@ class DatasetBTCV2(Dataset):
             elif len(set(candidates)) <= 1 and candidates[0] in support_names:
                 # 同类候选只有 1 个且已被相邻逻辑选中：允许重复以凑满 shot
                 support_names.append(candidates[0])
+            elif set(candidates).issubset(support_names):
+                # 稀有类候选不足 shot：唯一候选已耗尽时允许重复，避免死循环。
+                support_names.append(np.random.choice(candidates))
             else:
                 support_name = np.random.choice(candidates)
                 if support_name not in support_names:

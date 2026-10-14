@@ -6,8 +6,11 @@ import torch.nn.functional as F
 import numpy as np
 
 class  SAM_pred(nn.Module):
-    def __init__(self, ):
+    def __init__(self, encoder_precision='auto'):
         super().__init__()
+        if encoder_precision not in ('auto', 'fp32', 'bf16', 'fp16'):
+            raise ValueError(f'Unsupported SAM encoder precision: {encoder_precision}')
+        self.encoder_precision = encoder_precision
         # self.sam_model = sam_model_registry['vit_h']('/root/paddlejob/workspace/env_run/vrp_sam/sam_vit_h_4b8939.pth')
         _ckpt = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weights', 'sam_vit_h_4b8939.pth')
         self.sam_model = sam_model_registry['vit_h'](_ckpt)
@@ -20,8 +23,7 @@ class  SAM_pred(nn.Module):
             param.requires_grad = True
         
         self.sam_model.eval()
-        # 训练时（有数据增强）必须每次现算 query 特征，
-        # 否则缓存的 .npy 特征与增强后的图不匹配
+        # 只允许 eval 模式使用缓存；训练时在线编码增强后的 query。
         self.use_cache = True
         
     # 覆盖 train() 方法，保证冻结层的安全    
@@ -33,12 +35,31 @@ class  SAM_pred(nn.Module):
             self.sam_model.image_encoder.eval()
         return self
 
+    def resolve_encoder_precision(self, device):
+        """Only training on CUDA uses lower precision; eval caches remain FP32."""
+        device = torch.device(device)
+        if not self.training or device.type != 'cuda' or self.encoder_precision == 'fp32':
+            return 'fp32'
+        if self.encoder_precision == 'fp16':
+            return 'fp16'
+        native_bf16 = (torch.cuda.get_device_capability(device)[0] >= 8
+                       and torch.cuda.is_bf16_supported())
+        if native_bf16:
+            return 'bf16'
+        if self.encoder_precision == 'bf16':
+            raise RuntimeError('This GPU does not support native BF16; use '
+                               '--sam-encoder-precision fp32 or fp16')
+        return 'fp32'
+
     def forward_img_encoder(self, query_img):
         query_img = F.interpolate(query_img, (1024,1024), mode='bilinear', align_corners=True)
-
-        with torch.no_grad():
+        precision = self.resolve_encoder_precision(query_img.device)
+        dtype = {'bf16': torch.bfloat16, 'fp16': torch.float16}.get(precision, torch.float32)
+        with torch.no_grad(), torch.autocast(
+                device_type=query_img.device.type, dtype=dtype, enabled=precision != 'fp32'):
             query_feats = self.sam_model.image_encoder(query_img)
-        return  query_feats
+        # 冻结编码器无需 GradScaler；可训练的 prompt/decoder 和所有损失仍用 FP32。
+        return query_feats.float()
     
     # def get_feat_from_np(self, query_img, query_name, protos):
     #     # np_feat_path = '/root/paddlejob/workspace/env_run/vrp_sam/feats_np/coco/'
@@ -63,12 +84,15 @@ class  SAM_pred(nn.Module):
     #     return query_feats_np
     
     def get_feat_from_np(self, query_img, query_name, protos):
-        # 特征缓存放 /data2（/data 磁盘紧张），可用 TBD_FEATS 环境变量覆盖
-        np_feat_path = os.environ.get('TBD_FEATS', '/data2/2025Zhutaotao/TBD/cache_features')
-        if not os.path.exists(np_feat_path): 
-            os.makedirs(np_feat_path)
-            
-        files_name = os.listdir(np_feat_path)
+        # 即使直接调用此方法，训练也不能读取或写入增强图像的磁盘缓存。
+        if self.training or not self.use_cache:
+            return self.forward_img_encoder(query_img)
+
+        # 独立目录隔离旧缓存：旧文件可能来自历史随机增强，无法保证几何一致。
+        cache_root = os.environ.get('TBD_FEATS', '/data2/2025Zhutaotao/TBD/cache_features')
+        np_feat_path = os.path.join(cache_root, 'eval_unaugmented_v1')
+        os.makedirs(np_feat_path, exist_ok=True)
+
         query_feat_list = []
         for idx, name in enumerate(query_name):
             if '/root' in name:
@@ -76,18 +100,35 @@ class  SAM_pred(nn.Module):
                 
             # 使用 os.path.join 来确保路径分隔符正确
             save_path = os.path.join(np_feat_path, name + '.npy')
-            
-            if name + '.npy' not in files_name:
+
+            cached = None
+            if os.path.isfile(save_path):
+                try:
+                    cached_np = np.load(save_path, allow_pickle=False)
+                    if cached_np.shape == (1, 256, 64, 64) and np.isfinite(cached_np).all():
+                        cached = torch.from_numpy(cached_np).to(protos.device)
+                except Exception:
+                    cached = None   # 缓存损坏 → 重算
+
+            if cached is None:
                 query_feats_np = self.forward_img_encoder(query_img[idx, :, :, :].unsqueeze(0))
-                query_feat_list.append(query_feats_np)
-                query_feats_np = query_feats_np.detach().cpu().numpy()
-                # 修复点：使用拼接好的 save_path
-                np.save(save_path, query_feats_np)
-            else:
-                # 修复点：读取时也使用拼接好的 save_path
-                sub_query_feat = torch.from_numpy(np.load(save_path)).to(protos.device)
-                query_feat_list.append(sub_query_feat)
-                del sub_query_feat
+                cached = query_feats_np.to(protos.device)
+                # 原子写入：tmp 文件名带 PID，避免多 rank 同时写同一 .tmp 互相 rename 冲突
+                tmp_path = f'{save_path}.tmp{os.getpid()}'
+                try:
+                    # 文件句柄阻止 np.save 自动追加 .npy，保证 replace 的源路径正确。
+                    with open(tmp_path, 'wb') as tmp_file:
+                        np.save(tmp_file, query_feats_np.detach().cpu().numpy())
+                    os.replace(tmp_path, save_path)
+                except Exception:
+                    # 缓存写失败/竞争不影响训练，直接用刚算的特征继续
+                    try:
+                        if os.path.exists(tmp_path):
+                            os.remove(tmp_path)
+                    except Exception:
+                        pass
+
+            query_feat_list.append(cached)
         
         query_feats_np = torch.cat(query_feat_list, dim=0)
         return query_feats_np
@@ -206,14 +247,24 @@ class  SAM_pred(nn.Module):
     #     return low_masks, binary_mask.squeeze(1)
     
     
-    def forward(self, query_img, query_name, protos, boxes=None, use_cascade=False):
+    def forward(self, query_img, query_name, protos, boxes=None, use_cascade=False,
+                image_repeats=1):
         B, C_img, h, w = query_img.shape
+        if not isinstance(image_repeats, int) or image_repeats < 1:
+            raise ValueError('image_repeats must be a positive integer')
+        if len(query_name) != B or protos.shape[0] != B * image_repeats:
+            raise ValueError('query names and prompt batch must match query batch * image_repeats')
 
-        if self.use_cache:
+        if self.use_cache and not self.training:
             with torch.no_grad():
                 query_feats = self.get_feat_from_np(query_img, query_name, protos)
         else:
             query_feats = self.forward_img_encoder(query_img)
+
+        # 同一 query 的多个 support 仅重复 embedding，ViT-H 每张 query 编码一次。
+        # 顺序与 train.py 的 query.repeat_interleave(S) / support.flatten(0,1) 对齐。
+        if image_repeats > 1:
+            query_feats = query_feats.repeat_interleave(image_repeats, dim=0)
 
         # protos: [B, N, 256] (N=52 tokens)  → SAM sparse prompt
         # boxes:  [B, 1, 4]  (predicted bbox) → SAM box prompt

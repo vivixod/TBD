@@ -12,6 +12,7 @@ from SAM2pred import SAM_pred
 def test(args, model, sam_model, dataloader):
     r""" Test VRP_encoder model on a new organ (Spleen) """
     model.eval()
+    sam_model.eval()
     average_meter = AverageMeter(dataloader.dataset)
 
     with torch.no_grad():

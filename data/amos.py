@@ -17,6 +17,7 @@ from torch.utils.data import Dataset
 import cv2
 
 from data.medical_base import parse_patient_slice, build_patient_slice_index
+from data.episode_sampling import ClassBalancedQueryMixin
 
 
 # ===================== AMOS MR 友好增广 =====================
@@ -60,7 +61,7 @@ def amos_augment(img_pil, mask_tensor):
 
 
 # ===================== DatasetAMOS =====================
-class DatasetAMOS(Dataset):
+class DatasetAMOS(ClassBalancedQueryMixin, Dataset):
     r""" AMOS2022 MR 多器官 few-shot dataset（不继承 DatasetBTCV）。
 
     数据布局：
@@ -263,17 +264,16 @@ class DatasetAMOS(Dataset):
         return self._label_classes_cache[img_name]
 
     def sample_episode(self, idx):
-        query_name = self.img_metadata[idx]
-        # 读 mask 拿含前景的器官集（值 1~15）——用缓存避免每个 batch 重复解码 npz
-        label_class = self._label_classes(query_name)
-        if 0 in label_class:
-            label_class.remove(0)
-        label_class_0 = [c - 1 for c in label_class]              # 0-indexed
-        valid_classes = [c for c in label_class_0 if c in self.class_ids]
-        if len(valid_classes) == 0:
-            class_sample = self.class_ids[0]
+        balanced = self.sample_class_balanced_query()
+        if balanced is not None:
+            query_name, class_sample = balanced
         else:
-            class_sample = int(np.random.choice(valid_classes))
+            query_name = self.img_metadata[idx]
+            label_class = self._label_classes(query_name)
+            if 0 in label_class:
+                label_class.remove(0)
+            valid_classes = [c - 1 for c in label_class if c - 1 in self.class_ids]
+            class_sample = int(np.random.choice(valid_classes)) if valid_classes else self.class_ids[0]
 
         # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
         support_names = []
@@ -290,6 +290,8 @@ class DatasetAMOS(Dataset):
             elif len(set(candidates)) <= 1 and candidates[0] in support_names:
                 # 同类候选只有 1 个且已被相邻逻辑选中：允许重复以凑满 shot
                 support_names.append(candidates[0])
+            elif set(candidates).issubset(support_names):
+                support_names.append(np.random.choice(candidates))
             else:
                 support_name = np.random.choice(candidates)
                 if support_name not in support_names:

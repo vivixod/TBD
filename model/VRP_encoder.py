@@ -237,6 +237,8 @@ class VRP_encoder(nn.Module):
         else:
             raise Exception('Unavailable backbone: %s' % backbone)
         self.layer0.eval(), self.layer1.eval(), self.layer2.eval(), self.layer3.eval(), self.layer4.eval()
+        # 保留 layer4 参数供旧 checkpoint 加载；当前预测只使用 layer2/layer3。
+        self.layer4.requires_grad_(False)
         if backbone == 'vgg16':
             fea_dim = 512 + 256
         # else:
@@ -376,10 +378,8 @@ class VRP_encoder(nn.Module):
             supp_feat_2 = self.layer2(supp_feat_1)
             
         query_feat_3 = self.layer3(query_feat_2)
-        self.layer4(query_feat_3)            # layer4 可训练，需前向；输出不再被 C.P.G. 消费
 
         supp_feat_3 = self.layer3(supp_feat_2)
-        self.layer4(supp_feat_3)            # layer4 可训练，需前向；输出不再被 Iris 消费
             
         if query_feat_2.shape[-2:] != query_feat_3.shape[-2:]:
             query_feat_2 = F.interpolate(query_feat_2, size=(query_feat_3.size(2), query_feat_3.size(3)), mode='bilinear', align_corners=True)
@@ -529,7 +529,7 @@ class VRP_encoder(nn.Module):
         self.apply(fix_bn)
         self.layer0.eval(), self.layer1.eval(), self.layer2.eval()
         self.layer3.train()
-        self.layer4.train()
+        self.layer4.eval()
 
     def get_pseudo_mask(self, tmp_supp_feat, query_feat_4, mask):
         resize_size = tmp_supp_feat.size(2)

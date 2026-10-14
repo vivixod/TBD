@@ -96,7 +96,7 @@ class SelfAttentionLayer(nn.Module):
                      query_pos: Optional[Tensor] = None):
         q = k = self.with_pos_embed(tgt, query_pos)
         tgt2 = self.self_attn(q, k, value=tgt, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+                              key_padding_mask=tgt_key_padding_mask, need_weights=False)[0]
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
 
@@ -109,7 +109,7 @@ class SelfAttentionLayer(nn.Module):
         tgt2 = self.norm(tgt)
         q = k = self.with_pos_embed(tgt2, query_pos)
         tgt2 = self.self_attn(q, k, value=tgt2, attn_mask=tgt_mask,
-                              key_padding_mask=tgt_key_padding_mask)[0]
+                              key_padding_mask=tgt_key_padding_mask, need_weights=False)[0]
         tgt = tgt + self.dropout(tgt2)
         
         return tgt
@@ -157,7 +157,7 @@ class CrossAttentionLayer(nn.Module):
         tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt, query_pos),
                                    key=self.with_pos_embed(memory_key, pos),
                                    value=self.with_pos_embed(memory_value, value_pos), attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+                                   key_padding_mask=memory_key_padding_mask, need_weights=False)[0]
         tgt = tgt + self.dropout(tgt2)
         tgt = self.norm(tgt)
         
@@ -173,7 +173,7 @@ class CrossAttentionLayer(nn.Module):
         tgt2 = self.multihead_attn(query=self.with_pos_embed(tgt2, query_pos),
                                    key=self.with_pos_embed(memory_key, pos),
                                    value=self.with_pos_embed(memory_value, value_pos), attn_mask=memory_mask,
-                                   key_padding_mask=memory_key_padding_mask)[0]
+                                   key_padding_mask=memory_key_padding_mask, need_weights=False)[0]
         tgt = tgt + self.dropout(tgt2)
 
         return tgt
