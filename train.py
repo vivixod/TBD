@@ -484,6 +484,8 @@ if __name__ == '__main__':
                                                  neighbor_prob=args.neighbor_prob,
                                                  class_balance_prob=args.class_balance_prob)
     if utils.is_main_process():
+        Logger.info('[Support mask] downsample=adaptive_max_pool2d '
+                    '(binary foreground occupancy; train/eval)')
         datasets = getattr(dataloader_trn.dataset, 'sub_datasets', [dataloader_trn.dataset])
         for ds in datasets:
             available = getattr(ds, 'balanced_class_ids', ())

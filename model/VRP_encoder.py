@@ -389,7 +389,10 @@ class VRP_encoder(nn.Module):
             supp_feat_2 = F.interpolate(supp_feat_2, size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear', align_corners=True)
         supp_feat_cat = torch.cat([supp_feat_2, supp_feat_3], 1)
         
-        supp_mask_down = F.interpolate(mask_expanded, size=supp_feat_3.shape[-2:], mode='nearest')
+        # Preserve foreground occupancy: nearest can miss an entire small lesion
+        # between sample locations. Keep a feature cell if its region contains
+        # any foreground; share this binary mask across ICL and bbox branches.
+        supp_mask_down = F.adaptive_max_pool2d(mask_expanded, supp_feat_3.shape[-2:])
             
         # 提前降维到 256
         query_feat_down = self.downsample_query(query_feat_cat)
