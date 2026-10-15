@@ -17,6 +17,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .transformer_decoder import PositionEmbeddingSine
+from .attention_mask import support_background_mask
 
 
 class BboxTransferModule(nn.Module):
@@ -28,6 +29,7 @@ class BboxTransferModule(nn.Module):
         num_layers:      number of cross-attention layers per stage (default 1)
         dropout:         attention dropout (default 0.1)
         pre_norm:        use pre-LayerNorm (default True)
+        mask_support_attention: exclude background spatial keys; bbox keys stay valid
     """
 
     def __init__(
@@ -37,10 +39,12 @@ class BboxTransferModule(nn.Module):
         num_layers: int = 1,
         dropout: float = 0.1,
         pre_norm: bool = True,
+        mask_support_attention: bool = False,
     ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
+        self.mask_support_attention = bool(mask_support_attention)
 
         # ---- learnable query bbox tokens --------------------------------------
         # token 0 → 左上角, token 1 → 右下角
@@ -108,6 +112,7 @@ class BboxTransferModule(nn.Module):
         ffn_norm: nn.ModuleList,
         dropout: nn.Dropout,
         memory_pos: torch.Tensor = None,
+        memory_key_padding_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """Apply num_layers of cross-attention + FFN.
 
@@ -123,7 +128,9 @@ class BboxTransferModule(nn.Module):
 
         for i in range(self.num_layers):
             # cross-attention
-            attn_out, _ = cross_attn[i](query, k, v, need_weights=False)
+            attn_out, _ = cross_attn[i](
+                query, k, v, key_padding_mask=memory_key_padding_mask,
+                need_weights=False)
             query = query + dropout(attn_out)
             query = norm[i](query)
             # FFN
@@ -137,6 +144,7 @@ class BboxTransferModule(nn.Module):
         supp_bbox_emb: torch.Tensor,
         supp_feat: torch.Tensor,
         query_feat: torch.Tensor,
+        supp_mask: torch.Tensor = None,
     ) -> torch.Tensor:
         """Run bbox token transfer pipeline.
 
@@ -144,6 +152,7 @@ class BboxTransferModule(nn.Module):
             supp_bbox_emb:  [B, 2, C]   SAM-style support bbox token（RFF-PE+corner）
             supp_feat:      [B, C, H, W]  support feature map（建议为 mask 前景特征）
             query_feat:     [B, C, H, W]  query feature map
+            supp_mask:      [B, 1, H, W] or [B, H, W], needed when masking is enabled
 
         Returns:
             query_bbox_token:  [B, 2, C]  可直接作为 SAM sparse prompt 的框 token
@@ -160,6 +169,14 @@ class BboxTransferModule(nn.Module):
         supp_bbox_tokens = supp_bbox_emb.permute(1, 0, 2)     # [2, B, C]
         supp_memory = torch.cat([supp_bbox_tokens, supp_memory], dim=0)  # [HW+2, B, C]
 
+        supp_padding_mask = None
+        if self.mask_support_attention:
+            spatial_background = support_background_mask(supp_mask, supp_feat)
+            # The two bbox tokens remain readable, even if foreground is empty.
+            bbox_padding = torch.zeros((B, supp_bbox_tokens.shape[0]),
+                                       dtype=torch.bool, device=supp_feat.device)
+            supp_padding_mask = torch.cat([bbox_padding, spatial_background], dim=1)
+
         # query features as memory + positional encoding
         qry_memory = query_feat.flatten(2).permute(2, 0, 1)  # [HW, B, C]
         qry_pos = self.pe_layer(query_feat, None)            # [B, C, H, W]
@@ -174,6 +191,7 @@ class BboxTransferModule(nn.Module):
             ffn=self.supp_ffn,
             ffn_norm=self.supp_ffn_norm,
             dropout=self.supp_dropout,
+            memory_key_padding_mask=supp_padding_mask,
         )  # [2, B, C]
 
         # ---- Stage 2: enriched tokens → locate in query image ----------------

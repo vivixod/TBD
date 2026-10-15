@@ -352,6 +352,12 @@ if __name__ == '__main__':
     parser.add_argument('--shot', type=int, default=2)
     parser.add_argument('--bbox_loss_weight', type=float, default=0.5,
                         help='weight of the bbox token MSE loss (token-space supervision). 0 disables it.')
+    parser.add_argument('--bbox-support-attn-mask', type=int, choices=[0, 1], default=0,
+                        help='Exclude support background keys in bbox cross-attention; '
+                             'the two support bbox tokens remain valid.')
+    parser.add_argument('--icl-support-attn-mask', type=int, choices=[0, 1], default=0,
+                        help='Exclude support background keys in the 50-token prompt decoder; '
+                             'empty supports fall back to unmasked attention.')
     parser.add_argument('--sam-encoder-precision', choices=['auto', 'fp32', 'bf16', 'fp16'],
                         default='auto',
                         help='Frozen SAM image encoder training precision: auto uses native BF16 '
@@ -486,6 +492,10 @@ if __name__ == '__main__':
     if utils.is_main_process():
         Logger.info('[Support mask] downsample=adaptive_max_pool2d '
                     '(binary foreground occupancy; train/eval)')
+        Logger.info(f'[Support attention] bbox_mask={args.bbox_support_attn_mask}, '
+                    f'icl_mask={args.icl_support_attn_mask}; train/eval; '
+                    'bbox tokens always valid; ICL empty support=unmasked; '
+                    'query attention and EICL A@M unchanged')
         datasets = getattr(dataloader_trn.dataset, 'sub_datasets', [dataloader_trn.dataset])
         for ds in datasets:
             available = getattr(ds, 'balanced_class_ids', ())

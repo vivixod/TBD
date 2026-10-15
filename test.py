@@ -53,6 +53,10 @@ if __name__ == '__main__':
     parser.add_argument('--backbone', type=str, default='resnet50')
     parser.add_argument('--use_ignore', type=bool, default=True)
     parser.add_argument('--num_query', type=int, default=50)
+    parser.add_argument('--bbox-support-attn-mask', type=int, choices=[0, 1], default=0,
+                        help='Match the bbox support-attention setting used for training.')
+    parser.add_argument('--icl-support-attn-mask', type=int, choices=[0, 1], default=0,
+                        help='Match the ICL support-attention setting used for training.')
     args = parser.parse_args()
 
     # 环境设置 (单卡测试)

@@ -9,7 +9,18 @@ GPU_ID=0,1,2
 SAM_ENCODER_PRECISION=${SAM_ENCODER_PRECISION:-auto}
 # 0=原采样；0.5=一半先选器官再选 query；1=全部类别均衡。
 CLASS_BALANCE_PROB=${CLASS_BALANCE_PROB:-0.5}
-EXPERIMENT_NAME=${EXPERIMENT_NAME:-trn_joint4_shot4_cb${CLASS_BALANCE_PROB}}
+# Independent ablations; both disabled preserves the max-pooling baseline.
+BBOX_SUPPORT_ATTN_MASK=${BBOX_SUPPORT_ATTN_MASK:-0}
+ICL_SUPPORT_ATTN_MASK=${ICL_SUPPORT_ATTN_MASK:-0}
+case "$BBOX_SUPPORT_ATTN_MASK:$ICL_SUPPORT_ATTN_MASK" in
+    0:0|0:1|1:0|1:1) ;;
+    *) echo "BBOX_SUPPORT_ATTN_MASK and ICL_SUPPORT_ATTN_MASK must be 0 or 1" >&2; exit 2 ;;
+esac
+DEFAULT_EXPERIMENT_NAME=trn_joint4_shot4_cb${CLASS_BALANCE_PROB}
+if [ "$BBOX_SUPPORT_ATTN_MASK:$ICL_SUPPORT_ATTN_MASK" != "0:0" ]; then
+    DEFAULT_EXPERIMENT_NAME=${DEFAULT_EXPERIMENT_NAME}_bboxm${BBOX_SUPPORT_ATTN_MASK}_iclm${ICL_SUPPORT_ATTN_MASK}
+fi
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-${DEFAULT_EXPERIMENT_NAME}}
 FREE_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(s.getsockname()[1]); s.close()")
 echo "Using free port: $FREE_PORT"
 
@@ -39,5 +50,7 @@ CUDA_VISIBLE_DEVICES=${GPU_ID} python3 -m torch.distributed.launch \
         --num_query 50 \
         --epochs 300 \
         --sam-encoder-precision "${SAM_ENCODER_PRECISION}" \
+        --bbox-support-attn-mask "${BBOX_SUPPORT_ATTN_MASK}" \
+        --icl-support-attn-mask "${ICL_SUPPORT_ATTN_MASK}" \
         --lr 1e-4 \
         --bsz 1

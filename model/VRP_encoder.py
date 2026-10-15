@@ -275,6 +275,7 @@ class VRP_encoder(nn.Module):
             nhead=8,
             num_layers=1,
             dropout=0.1,
+            mask_support_attention=bool(getattr(args, 'bbox_support_attn_mask', False)),
         )
         
         # ==================================================
@@ -449,7 +450,8 @@ class VRP_encoder(nn.Module):
         supp_feat_fg = supp_feat_down * supp_mask_down   # 只保留支持图前景
         query_bbox_token = self.bbox_transfer(supp_bbox_emb,
                                               supp_feat_fg,
-                                              query_feat_down)  # [B, 2, 256]
+                                              query_feat_down,
+                                              supp_mask=supp_mask_down)  # [B, 2, 256]
 
         # 返回：50 tokens + 2 个框 token + pseudo_mask
         return protos, query_bbox_token, pseudo_mask

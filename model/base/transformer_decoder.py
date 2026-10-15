@@ -6,6 +6,7 @@ from typing import Optional
 import torch
 from torch import nn, Tensor
 from torch.nn import functional as F
+from .attention_mask import support_background_mask
 
 import math
 import numpy as np
@@ -265,6 +266,7 @@ class transformer_decoder(nn.Module):
   """ Transformer decoder to get point query"""
   def __init__(self, args, num_queries, hidden_dim, dim_feedforward, nheads=4, num_layers=1, pre_norm=False):
     super().__init__()
+    self.mask_support_attention = bool(getattr(args, 'icl_support_attn_mask', False))
     N_steps = hidden_dim // 2
     self.pe_layer = PositionEmbeddingSine(N_steps, normalize=True)
 
@@ -323,6 +325,14 @@ class transformer_decoder(nn.Module):
                                                                                                                                                                              
     pos_x_s = self.pe_layer(x_s, None).flatten(2).to(x_s.device).permute(2, 0, 1)                                                                                            
     src_x_s = x_s.flatten(2).permute(2, 0, 1)                                                                                                                                
+
+    support_padding_mask = None
+    if self.mask_support_attention:
+        background = support_background_mask(support_mask, x_s)
+        # A fully masked softmax is undefined. Empty supports use the original
+        # unmasked attention for that sample; other samples keep their masks.
+        empty = background.all(dim=1, keepdim=True)
+        support_padding_mask = background & ~empty
                                                                                                                                                                    
     q_supp_out = self.supp_q_feat.weight.unsqueeze(1).repeat(1, bs, 1)                                                                                                      
 
@@ -332,7 +342,7 @@ class transformer_decoder(nn.Module):
         output = self.transformer_cross_attention_layers_0[i](                                                                                                               
             q_supp_out, src_x_s, src_x_s,                                                                                                                                            
             memory_mask=None,                                                                                                                                                
-            memory_key_padding_mask=None,  # here we do not apply masking on padded region                                                                                   
+            memory_key_padding_mask=support_padding_mask,
             pos=pos_x_s, query_pos=None                                                                                                                              
         )                                                                                                                                                          
 
