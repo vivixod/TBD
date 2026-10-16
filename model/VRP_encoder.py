@@ -9,6 +9,10 @@ import torch.nn.functional as F
 import model.base.resnet as models
 import model.base.vgg as vgg_models
 from model.base.eicl_interaction import EICLInteraction
+from model.base.mask_pooling import resize_support_mask
+from model.base.mask_pooling import repeat_dataset_names
+from model.base.support_fusion import (SupportQualityHead, decode_support_logits,
+                                      fuse_support_logits, fusion_mix_for_epoch)
 from model.base.bbox_tokenizer import (bbox_to_sam_format,
     PositionEmbeddingRandom, CornerTypeEmbedding, encode_support_bbox,
     extract_gt_bbox, perturb_bbox)
@@ -163,6 +167,8 @@ class VRP_encoder(nn.Module):
         # 1. Backbone network initialization
         self.backbone_type = backbone
         self.use_original_imgsize = use_original_imgsize
+        self.support_mask_pooling = getattr(args, 'support_mask_pooling', 'max')
+        self.dataset_name = getattr(args, 'benchmark', None)
         if backbone == 'vgg16':
             vgg_models.BatchNorm = BatchNorm
             vgg16 = vgg_models.vgg16_bn(pretrained=True)
@@ -300,6 +306,18 @@ class VRP_encoder(nn.Module):
         # Loss 函数
         self.bce_with_logits_loss = nn.BCEWithLogitsLoss()
         self.l1_loss = nn.L1Loss()
+        self.support_fusion = getattr(args, 'support_fusion', 'mean')
+        if self.support_fusion not in ('mean', 'quality'):
+            raise ValueError('support_fusion must be mean or quality')
+        self.support_quality_head = (SupportQualityHead(self.hidden_dim)
+                                     if self.support_fusion == 'quality' else None)
+        self.fusion_warmup_epochs = getattr(args, 'fusion_warmup_epochs', 2)
+        self.fusion_ramp_epochs = getattr(args, 'fusion_ramp_epochs', 3)
+
+    def set_fusion_epoch(self, epoch):
+        if self.support_quality_head is not None:
+            self.support_quality_head.mix.fill_(fusion_mix_for_epoch(
+                epoch, self.fusion_warmup_epochs, self.fusion_ramp_epochs))
 
     # def forward(self, condition, query_img, support_img, support_mask, training):
 
@@ -358,7 +376,8 @@ class VRP_encoder(nn.Module):
     #     # protos = self.transformer_decoder(query_feat_1, supp_feat_1, support_mask)
     #     # return protos, support_mask_ori
 
-    def forward(self, condition, query_img, support_img, support_mask, training):
+    def forward(self, condition, query_img, support_img, support_mask, training,
+                dataset_names=None, return_quality=False):
         support_mask_ori = support_mask
         
         if support_mask.dim() == 3:
@@ -390,10 +409,11 @@ class VRP_encoder(nn.Module):
             supp_feat_2 = F.interpolate(supp_feat_2, size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear', align_corners=True)
         supp_feat_cat = torch.cat([supp_feat_2, supp_feat_3], 1)
         
-        # Preserve foreground occupancy: nearest can miss an entire small lesion
-        # between sample locations. Keep a feature cell if its region contains
-        # any foreground; share this binary mask across ICL and bbox branches.
-        supp_mask_down = F.adaptive_max_pool2d(mask_expanded, supp_feat_3.shape[-2:])
+        # The same per-episode policy feeds both ICL and bbox branches.
+        # In adam-only mode, joint train/validation pass actual dataset names.
+        supp_mask_down = resize_support_mask(
+            mask_expanded, supp_feat_3.shape[-2:], self.support_mask_pooling,
+            dataset_names=self.dataset_name if dataset_names is None else dataset_names)
             
         # 提前降维到 256
         query_feat_down = self.downsample_query(query_feat_cat)
@@ -453,7 +473,13 @@ class VRP_encoder(nn.Module):
                                               query_feat_down,
                                               supp_mask=supp_mask_down)  # [B, 2, 256]
 
-        # 返回：50 tokens + 2 个框 token + pseudo_mask
+        if return_quality:
+            if self.support_quality_head is None:
+                raise ValueError('Quality scores require support_fusion=quality')
+            scores = self.support_quality_head(
+                protos, query_bbox_token, mask_expanded, supp_mask_down)
+            return protos, query_bbox_token, pseudo_mask, scores
+        # Legacy callers retain the three-output interface.
         return protos, query_bbox_token, pseudo_mask
 
     def mask_feature(self, features, support_mask):
@@ -465,37 +491,33 @@ class VRP_encoder(nn.Module):
         return supp_feat
 
     def predict_mask_nshot(self, args, batch, sam_model, nshot, input_point=None):
-
-        logit_mask_agg = 0
-        token_set = []
-        bbox_token_set = []
-        for s_idx in range(nshot):
-            tokens_sub, bbox_token_sub, _ = self(args.condition, batch['query_img'], batch['support_imgs'][:, s_idx], batch['support_masks'][:, s_idx], False)
-            token_set.append(tokens_sub)
-            bbox_token_set.append(bbox_token_sub)
-            
-        if nshot > 1:
-            fused_token = torch.stack(token_set, dim=0).mean(dim=0)
-            bbox_token = torch.stack(bbox_token_set, dim=0).mean(dim=0)
-        else:
-            fused_token = tokens_sub
-            bbox_token = bbox_token_sub
-
-        # 拼接 50 tokens + 2 框 tokens → SAM sparse prompt
-        # （与 train.py 保持一致：coarse_mask 不传 SAM —— 该 attn bias 为试错后弃用）
-        protos_all = torch.cat([fused_token, bbox_token], dim=1)   # [B, 52, C]
-
-        low_masks, pred_mask = sam_model(batch['query_img'], batch['query_name'], protos_all)
-        logit_mask = low_masks
+        """Match train.py validation: decode each shot, then average logits."""
+        batch_size, available_shots = batch['support_imgs'].shape[:2]
+        if (not isinstance(nshot, int) or isinstance(nshot, bool)
+                or not 1 <= nshot <= available_shots):
+            raise ValueError('nshot must be a positive integer within the available supports')
+        dataset_names = repeat_dataset_names(
+            batch.get('dataset_name', getattr(args, 'benchmark', None)),
+            batch_size, repeats=nshot)
+        quality = getattr(self, 'support_fusion', 'mean') == 'quality'
+        outputs = self(
+            args.condition, batch['query_img'].repeat_interleave(nshot, dim=0),
+            batch['support_imgs'][:, :nshot].flatten(0, 1),
+            batch['support_masks'][:, :nshot].flatten(0, 1),
+            False, dataset_names=dataset_names, **({'return_quality': True} if quality else {}))
+        tokens, bbox_tokens = outputs[:2]
+        protos_all = torch.cat([tokens, bbox_tokens], dim=1)  # [B*S, 52, C]
+        shot_logits = decode_support_logits(
+            sam_model, batch['query_img'], batch['query_name'], protos_all, nshot)
+        scores = outputs[3].reshape(batch_size, nshot) if quality else None
+        mix = self.support_quality_head.mix if quality else 1.0
+        logit_mask, _ = fuse_support_logits(shot_logits, scores, mix)
+        logit_mask = logit_mask.unsqueeze(1)
         if self.use_original_imgsize:
             org_qry_imsize = tuple([batch['org_query_imsize'][1].item(), batch['org_query_imsize'][0].item()])
             logit_mask = F.interpolate(logit_mask, org_qry_imsize, mode='bilinear', align_corners=True)
-        pred_mask = torch.sigmoid(logit_mask) >= 0.5
-
-        pred_mask = pred_mask.float()
-            
-        logit_mask_agg += pred_mask.squeeze(1).clone()
-        return logit_mask_agg, pred_mask, logit_mask
+        pred_mask = (torch.sigmoid(logit_mask) > 0.5).float()
+        return pred_mask.squeeze(1).clone(), pred_mask, logit_mask
     
 
     def compute_objective(self, logit_mask, gt_mask):

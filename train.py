@@ -12,8 +12,12 @@ import torch.distributed as dist
 import matplotlib.pyplot as plt
 import numpy as np
 import csv
+import math
 
 from model.VRP_encoder import VRP_encoder
+from model.base.mask_pooling import repeat_dataset_names
+from model.base.support_fusion import (decode_support_logits, fuse_support_logits,
+                                      support_quality_loss)
 from common.logger import Logger, AverageMeter
 from common.evaluation import Evaluator
 from common import utils
@@ -29,10 +33,19 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
     sam_model.train(training)  # train: 在线编码增强图；eval: 使用未增强图的独立缓存
     average_meter = AverageMeter(dataloader.dataset)
     bbox_cos_buf = []   # 每 batch 的 bbox token cos 相似度，epoch 末打印均值
+    quality_mode = getattr(args, 'support_fusion', 'mean') == 'quality'
+    quality_kwargs = {'return_quality': True} if quality_mode else {}
+    fusion_totals = None
+    if quality_mode and training:
+        model.module.set_fusion_epoch(epoch)
 
     for idx, batch in enumerate(dataloader):
         
         batch = utils.to_cuda(batch)
+        support_dataset_names = repeat_dataset_names(
+            batch.get('dataset_name', dataloader.dataset.benchmark),
+            batch_size=batch['query_img'].shape[0],
+            repeats=batch['support_imgs'].shape[1])
 
         # # =====================================================================
         # # 🚨 DEBUG: 可视化 Query 和所有的 Support 图像以检查采样合理性 🚨
@@ -165,7 +178,10 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
             # print(f"Debug: q_imgs_dummy shape after repeat_interleave: {q_imgs_dummy.shape}")  # [B*S, C, H, W]
 
             # 3. 此时所有输入都是标准的 4D 张量，送入模型
-            p_all, bbox_token, _ = model(args.condition, q_imgs_dummy, supp_imgs_flat, supp_masks_flat, training)
+            outputs = model(args.condition, q_imgs_dummy, supp_imgs_flat,
+                            supp_masks_flat, training,
+                            dataset_names=support_dataset_names, **quality_kwargs)
+            p_all, bbox_token = outputs[:2]
 
             # 3a. 拼接 50 上下文 tokens + 2 bbox tokens → 52 tokens 作为 SAM sparse prompt
             #     （coarse_mask 不传 SAM —— 该 attn bias 为试错后弃用）
@@ -178,11 +194,11 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
             bbox_cos_buf.append(cos_sim.item())
 
             # 4. 调用 SAM 模型（不传 coarse_mask —— cascaded post-refinement 撤掉，结论：负效果）
-            logit_mask, _ = sam_model(batch['query_img'], batch['query_name'],
-                                     protos_all, image_repeats=S)
-
-            logit_mask = logit_mask.view(B, S, H, W)   # [B, S, H, W]
-            logit_mask = logit_mask.mean(dim=1)           # [B, H, W]  简单平均即可
+            shot_logits = decode_support_logits(
+                sam_model, batch['query_img'], batch['query_name'], protos_all, S)
+            scores = outputs[3].reshape(B, S) if quality_mode else None
+            mix = model.module.support_quality_head.mix if quality_mode else 1.0
+            logit_mask, fusion_weights = fuse_support_logits(shot_logits, scores, mix)
             
         
         # if training:
@@ -208,7 +224,10 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
                 # print(f"Debug: q_imgs_dummy shape after repeat_interleave: {q_imgs_dummy.shape}")  # [B*S, C, H, W]
 
                 # 3. 此时所有输入都是标准的 4D 张量，送入模型
-                p_all, bbox_token, _ = model(args.condition, q_imgs_dummy, supp_imgs_flat, supp_masks_flat, training)
+                outputs = model(args.condition, q_imgs_dummy, supp_imgs_flat,
+                                supp_masks_flat, training,
+                                dataset_names=support_dataset_names, **quality_kwargs)
+                p_all, bbox_token = outputs[:2]
 
                 # 3a. 拼接 50 + 2 → 52 tokens 作为 SAM sparse prompt（与训练一致）
                 protos_all = torch.cat([p_all, bbox_token], dim=1)   # [B*S, 52, C]
@@ -219,11 +238,11 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
                 bbox_cos_buf.append(cos_sim.item())
 
                 # 4. 调用 SAM 模型（不传 coarse_mask —— cascaded post-refinement 撤掉，结论：负效果）
-                logit_mask, _ = sam_model(batch['query_img'], batch['query_name'],
-                                         protos_all, image_repeats=S)
-
-                logit_mask = logit_mask.view(B, S, H, W)   # [B, S, H, W]
-                logit_mask = logit_mask.mean(dim=1)           # [B, H, W]  简单平均即可
+                shot_logits = decode_support_logits(
+                    sam_model, batch['query_img'], batch['query_name'], protos_all, S)
+                scores = outputs[3].reshape(B, S) if quality_mode else None
+                mix = model.module.support_quality_head.mix if quality_mode else 1.0
+                logit_mask, fusion_weights = fuse_support_logits(shot_logits, scores, mix)
                 
                 if model.module.use_original_imgsize:  # 注意检查你的模型是否用这个属性
                     org_qry_imsize = tuple([batch['org_query_imsize'][1].item(), 
@@ -243,6 +262,26 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
         # 总损失 = 分割损失 (BCE + Dice) + λ * bbox token MSE 损失
         loss = model.module.compute_objective(logit_mask, batch['query_mask'])
         loss = loss + args.bbox_loss_weight * loss_bbox
+        if quality_mode:
+            loss_quality, shot_dice, quality_valid = support_quality_loss(
+                scores, shot_logits, batch['query_mask'], args.fusion_target_temperature)
+            loss = loss + args.fusion_quality_weight * loss_quality
+            with torch.no_grad():
+                weights = fusion_weights.detach()
+                entropy = -(weights * weights.clamp_min(1e-8).log()).sum(1)
+                entropy = entropy / math.log(S) if S > 1 else entropy * 0
+                selected_dice = shot_dice.gather(1, weights.argmax(1)[:, None])[:, 0]
+                valid = quality_valid.float()
+                totals = torch.stack([
+                    loss_quality.detach() * B, shot_logits.new_tensor(B),
+                    entropy.sum(), weights.max(1).values.sum(),
+                    (selected_dice * valid).sum(), (shot_dice.max(1).values * valid).sum(),
+                    valid.sum()])
+                totals = torch.cat([totals, weights.sum(0)]).double()
+                if fusion_totals is None:
+                    fusion_totals = totals
+                else:
+                    fusion_totals += totals
         if training:
             optimizer.zero_grad()
             loss.backward()
@@ -254,6 +293,30 @@ def train(args, epoch, model, sam_model, dataloader, optimizer, scheduler, train
         average_meter.write_process(idx, len(dataloader), epoch, write_batch_idx=50)
 
     # 每 5 个 epoch 打印一次 bbox token 监控信息（含权重，便于复现）
+    if fusion_totals is not None:
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(fusion_totals)
+        if utils.is_main_process():
+            total = fusion_totals.cpu().tolist()
+            count, valid_count = max(total[1], 1), max(total[6], 1)
+            phase = split_name or ('train' if training else 'valid')
+            metrics = dict(quality_loss=total[0] / count,
+                           entropy=total[2] / count, max_weight=total[3] / count,
+                           selected_dice=100 * total[4] / valid_count,
+                           best_shot_dice=100 * total[5] / valid_count)
+            weight_means = [v / count for v in total[7:]]
+            Logger.info(f'[Support fusion {phase}] epoch={epoch} mode=quality '
+                        f'mix={float(model.module.support_quality_head.mix):.3f} '
+                        f'quality_loss={metrics["quality_loss"]:.5f} '
+                        f'entropy={metrics["entropy"]:.3f} max_weight={metrics["max_weight"]:.3f} '
+                        f'mean_weights={[round(v, 3) for v in weight_means]} '
+                        f'selected_Dice={metrics["selected_dice"]:.2f} '
+                        f'best_shot_Dice={metrics["best_shot_dice"]:.2f} '
+                        f'valid_queries={int(total[6])}/{int(total[1])}')
+            writer = getattr(Logger, 'tbd_writer', None)
+            if writer is not None:
+                writer.add_scalars(f'fusion/{phase}', metrics, epoch)
+
     if epoch % 5 == 0 and utils.is_main_process():
         split_name_ = 'Training' if training else 'Validation'
         if bbox_cos_buf:
@@ -355,6 +418,9 @@ if __name__ == '__main__':
     parser.add_argument('--bbox-support-attn-mask', type=int, choices=[0, 1], default=0,
                         help='Exclude support background keys in bbox cross-attention; '
                              'the two support bbox tokens remain valid.')
+    parser.add_argument('--support-mask-pooling', choices=['max', 'nearest', 'adam-only'],
+                        default='max', help='Support mask resize: max for all datasets, '
+                        'nearest for all, or max on ADAM and nearest elsewhere. Train/eval match.')
     parser.add_argument('--icl-support-attn-mask', type=int, choices=[0, 1], default=0,
                         help='Exclude support background keys in the 50-token prompt decoder; '
                              'empty supports fall back to unmasked attention.')
@@ -362,9 +428,21 @@ if __name__ == '__main__':
                         default='auto',
                         help='Frozen SAM image encoder training precision: auto uses native BF16 '
                              'when supported, otherwise FP32. Validation always uses FP32.')
+    parser.add_argument('--support-fusion', choices=['mean', 'quality'], default='mean',
+                        help='Fuse per-support SAM logits with uniform or learned reliability weights.')
+    parser.add_argument('--fusion-quality-weight', type=float, default=0.1)
+    parser.add_argument('--fusion-target-temperature', type=float, default=0.2)
+    parser.add_argument('--fusion-warmup-epochs', type=int, default=2)
+    parser.add_argument('--fusion-ramp-epochs', type=int, default=3)
     args = parser.parse_args()
     if not 0.0 <= args.class_balance_prob <= 1.0:
         parser.error('--class-balance-prob must be between 0 and 1')
+    if not math.isfinite(args.fusion_quality_weight) or args.fusion_quality_weight < 0:
+        parser.error('--fusion-quality-weight must be finite and nonnegative')
+    if not math.isfinite(args.fusion_target_temperature) or args.fusion_target_temperature <= 0:
+        parser.error('--fusion-target-temperature must be finite and positive')
+    if min(args.fusion_warmup_epochs, args.fusion_ramp_epochs) < 0:
+        parser.error('Fusion warmup and ramp epochs must be nonnegative')
     # Distributed setting
     local_rank = args.local_rank
     
@@ -432,6 +510,8 @@ if __name__ == '__main__':
     # 4. Bbox 分支（bbox_transfer + corner_emb）—— 必须注册，否则 bbox branch 只算梯度不更新
     param_groups.append({'params': model.module.bbox_transfer.parameters(), 'lr': args.lr})
     param_groups.append({'params': model.module.corner_emb.parameters(), 'lr': args.lr})
+    if model.module.support_quality_head is not None:
+        param_groups.append({'params': model.module.support_quality_head.parameters(), 'lr': args.lr})
     
     # param_groups.append({'params': model.module.reduce_conv.parameters(), 'lr': args.lr * 0.001})
     # param_groups.append({'params': model.module.merge_conv.parameters(), 'lr': args.lr * 0.001})
@@ -490,8 +570,15 @@ if __name__ == '__main__':
                                                  neighbor_prob=args.neighbor_prob,
                                                  class_balance_prob=args.class_balance_prob)
     if utils.is_main_process():
-        Logger.info('[Support mask] downsample=adaptive_max_pool2d '
-                    '(binary foreground occupancy; train/eval)')
+        pooling_rules = {'max': 'all=adaptive_max_pool2d', 'nearest': 'all=nearest',
+                         'adam-only': 'ADAM=adaptive_max_pool2d, others=nearest'}
+        Logger.info(f'[Support mask] policy={args.support_mask_pooling}; train/eval; '
+                    f'{pooling_rules[args.support_mask_pooling]}')
+        Logger.info(f'[Support fusion] mode={args.support_fusion}; per-shot SAM logits; '
+                    f'quality_weight={args.fusion_quality_weight} '
+                    f'target_temperature={args.fusion_target_temperature} '
+                    f'warmup={args.fusion_warmup_epochs} ramp={args.fusion_ramp_epochs}; '
+                    'query GT only supervises quality, never generates inference weights')
         Logger.info(f'[Support attention] bbox_mask={args.bbox_support_attn_mask}, '
                     f'icl_mask={args.icl_support_attn_mask}; train/eval; '
                     'bbox tokens always valid; ICL empty support=unmasked; '

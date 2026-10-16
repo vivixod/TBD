@@ -122,9 +122,29 @@ SAM2pred.py                   SAM 适配
 
 ## Requirements
 
-- Python 3.9+
-- PyTorch 1.12+（训练环境：conda env `ztt`）
-- segment-anything: `cd segment-anything && pip install -v -e .`
+当前训练环境为 Conda `vrpsam`：Python 3.9.25、PyTorch 2.8.0、
+torchvision 0.23.0，PyTorch CUDA 构建版本为 12.8。
+`requirements.txt` 固定项目直接依赖的已安装版本，SAM 使用仓库内的源码。
+
+在仓库根目录安装：
+
+```bash
+conda create -n vrpsam python=3.9.25
+conda activate vrpsam
+python -m pip install -r requirements.txt
+```
+
+SAM 单独以 editable 模式安装：
+
+```bash
+cd segment-anything
+pip install -v -e .
+cd ..
+```
+
+已有 `vrpsam` 环境时，跳过创建步骤。
+`match_abd_to_img.py` 的 NIfTI 转换额外需要 `nibabel`（当前训练环境未安装）：
+`python -m pip install nibabel`。
 
 ## BibTeX
 

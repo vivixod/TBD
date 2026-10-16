@@ -1,9 +1,23 @@
-torch>=2.0.0
-torchvision>=0.15.0
-numpy>=1.24.0
-opencv-python>=4.8.0
-Pillow>=9.0.0
-fvcore
-pycocotools
-tensorboardX
-segment-anything
+# Project dependencies pinned to the current conda environment: vrpsam.
+# Python 3.9.25; Linux x86_64; PyTorch CUDA build 12.8.
+# Run from the repository root: python -m pip install -r requirements.txt
+
+# Training and model dependencies.
+torch==2.8.0
+torchvision==0.23.0
+timm==1.0.30
+fvcore==0.1.5.post20221221
+tensorboardX==2.6.5
+
+# Image loading, medical dataset processing, and visualization.
+numpy==2.0.2
+scipy==1.13.1
+opencv-python==5.0.0.93
+Pillow==11.3.0
+matplotlib==3.9.4
+pycocotools==2.0.11
+
+# Install SAM separately: cd segment-anything && pip install -v -e .
+
+# Optional NIfTI conversion (match_abd_to_img.py): python -m pip install nibabel
+# nibabel is not installed in the current vrpsam environment.

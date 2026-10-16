@@ -168,20 +168,67 @@ class AttentionLauncherTests(unittest.TestCase):
                 with self.subTest(bbox=bbox, icl=icl):
                     env = dict(os.environ, PATH=tmp + os.pathsep + os.environ['PATH'],
                                BBOX_SUPPORT_ATTN_MASK=str(bbox), ICL_SUPPORT_ATTN_MASK=str(icl),
-                               CLASS_BALANCE_PROB='0.5')
+                               CLASS_BALANCE_PROB='0.5', SUPPORT_MASK_POOLING='max',
+                               SUPPORT_FUSION='mean')
                     env.pop('EXPERIMENT_NAME', None)
                     result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                             env=env, capture_output=True, text=True, check=True)
                     args = json.loads(result.stdout.splitlines()[-1])
                     self.assertEqual(args[args.index('--bbox-support-attn-mask') + 1], str(bbox))
                     self.assertEqual(args[args.index('--icl-support-attn-mask') + 1], str(icl))
-                    expected = 'trn_joint4_shot4_cb0.5'
+                    expected = 'trn_joint4_shot4_cb0.5_poolmax'
                     if bbox or icl:
                         expected += f'_bboxm{bbox}_iclm{icl}'
                     self.assertEqual(args[args.index('--logpath') + 1], expected)
                     self.assertEqual(args[args.index('--epochs') + 1], '300')
                     self.assertEqual(args[args.index('--n-episodes') + 1], '8000')
             env['BBOX_SUPPORT_ATTN_MASK'] = '2'
+            result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+
+            env['BBOX_SUPPORT_ATTN_MASK'] = '0'
+            env['ICL_SUPPORT_ATTN_MASK'] = '0'
+            for policy in ('max', 'nearest', 'adam-only'):
+                env['SUPPORT_MASK_POOLING'] = policy
+                result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
+                                        env=env, capture_output=True, text=True, check=True)
+                args = json.loads(result.stdout.splitlines()[-1])
+                self.assertEqual(args[args.index('--support-mask-pooling') + 1], policy)
+                self.assertEqual(args[args.index('--logpath') + 1],
+                                 'trn_joint4_shot4_cb0.5_pool' + policy)
+            env['SUPPORT_MASK_POOLING'] = 'invalid'
+            result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
+                                    env=env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 2)
+
+    def test_quality_mode_routes_schedule_names_logs_and_counts_visible_gpus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            python = Path(tmp) / 'python3'
+            python.write_text(f'#!{sys.executable}\n'
+                              'import json, sys\n'
+                              'if sys.argv[1] == "-c": print(23456)\n'
+                              'else: print(json.dumps(sys.argv[1:]))\n')
+            python.chmod(0o755)
+            env = dict(os.environ, PATH=tmp + os.pathsep + os.environ['PATH'],
+                       SUPPORT_MASK_POOLING='max', SUPPORT_FUSION='quality',
+                       CLASS_BALANCE_PROB='0.5', BBOX_SUPPORT_ATTN_MASK='1',
+                       ICL_SUPPORT_ATTN_MASK='1', GPU_ID='0,1,2',
+                       FUSION_QUALITY_WEIGHT='0.1', FUSION_TARGET_TEMPERATURE='0.2',
+                       FUSION_WARMUP_EPOCHS='2', FUSION_RAMP_EPOCHS='3')
+            env.pop('EXPERIMENT_NAME', None)
+            result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
+                                    env=env, capture_output=True, text=True, check=True)
+            args = json.loads(result.stdout.splitlines()[-1])
+            self.assertIn('--nproc_per_node=3', args)
+            for flag, value in [('--support-fusion', 'quality'),
+                                ('--fusion-quality-weight', '0.1'),
+                                ('--fusion-target-temperature', '0.2'),
+                                ('--fusion-warmup-epochs', '2'), ('--fusion-ramp-epochs', '3')]:
+                self.assertEqual(args[args.index(flag) + 1], value)
+            self.assertEqual(args[args.index('--logpath') + 1],
+                             'trn_joint4_shot4_cb0.5_poolmax_bboxm1_iclm1_fusionquality_qw0.1_qt0.2_fw2_fr3')
+            env['SUPPORT_FUSION'] = 'invalid'
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                     env=env, capture_output=True, text=True)
             self.assertEqual(result.returncode, 2)

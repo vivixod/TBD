@@ -147,6 +147,7 @@ class Logger:
 
         cls.logpath = os.path.join('logs', logpath + '.log')
         cls.benchmark = args.benchmark
+        cls.run_config = vars(args).copy()
         # 防覆盖保护：若历史日志已存在，自动追加时间戳后缀，避免覆盖旧实验记录
         if os.path.exists(os.path.join(cls.logpath, 'log.txt')):
             cls.logpath = cls.logpath + logtime
@@ -189,7 +190,9 @@ class Logger:
         sam_finetuned = {k: v for k, v in sam_sd.items()
                          if 'prompt_encoder' in k or 'mask_decoder' in k}
         ckpt = {'model': model.state_dict(),
-                'sam_model': sam_finetuned}
+                'sam_model': sam_finetuned,
+                'config': getattr(cls, 'run_config', {}).copy(),
+                'epoch': int(epoch), 'val_dice': float(val_dice)}
         torch.save(ckpt, os.path.join(cls.logpath, 'best_model.pt'))
         cls.info('Model saved @%d w/ val. Dice: %5.2f.\n' % (epoch, val_dice))
 

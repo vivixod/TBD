@@ -3,6 +3,7 @@ import argparse
 import torch
 import torch.nn as nn
 from model.VRP_encoder import VRP_encoder
+from model.base.support_fusion import checkpoint_fusion_mode
 from common.logger import Logger, AverageMeter
 from common.evaluation import Evaluator
 from common import utils
@@ -55,21 +56,25 @@ if __name__ == '__main__':
     parser.add_argument('--num_query', type=int, default=50)
     parser.add_argument('--bbox-support-attn-mask', type=int, choices=[0, 1], default=0,
                         help='Match the bbox support-attention setting used for training.')
+    parser.add_argument('--support-mask-pooling', choices=['max', 'nearest', 'adam-only'],
+                        default='max', help='Match the support mask pooling policy used for training.')
     parser.add_argument('--icl-support-attn-mask', type=int, choices=[0, 1], default=0,
                         help='Match the ICL support-attention setting used for training.')
+    parser.add_argument('--support-fusion', choices=['mean', 'quality'], default=None,
+                        help='Default: infer from checkpoint; explicit mode must match saved parameters.')
     args = parser.parse_args()
 
     # 环境设置 (单卡测试)
     device = torch.device('cuda:0')
     utils.fix_randseed(args.seed)
 
-    # 1. 模型初始化
-    model = VRP_encoder(args, args.backbone, False)
-    sam_model = SAM_pred()
-    
     # 2. 加载权重（兼容 {model, sam_model} 打包格式与旧的裸 state_dict 格式）
     print(f"==> Loading weights from {args.load}")
-    ckpt = torch.load(args.load, map_location=device)
+    ckpt = torch.load(args.load, map_location='cpu', weights_only=True)
+    args.support_fusion = checkpoint_fusion_mode(ckpt, args.support_fusion)
+    print(f'==> support fusion: {args.support_fusion} (saved mix is restored)')
+    model = VRP_encoder(args, args.backbone, False)
+    sam_model = SAM_pred()
     if isinstance(ckpt, dict) and 'model' in ckpt:
         model_ckpt, sam_ckpt = ckpt['model'], ckpt.get('sam_model')
     else:

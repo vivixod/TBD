@@ -15,6 +15,11 @@ btcv-temp/
 check_dataset_names*.csv
 experiment_summary.xlsx
 
+# Generated analysis reports, images, features, and checkpoint snapshots.
+# Keep reusable analysis scripts under version control.
+/analysis/*
+!/analysis/*.py
+
 # ===== Python =====
 __pycache__/
 *.pyc
