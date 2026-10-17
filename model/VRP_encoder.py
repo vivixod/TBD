@@ -167,6 +167,9 @@ class VRP_encoder(nn.Module):
         # 1. Backbone network initialization
         self.backbone_type = backbone
         self.use_original_imgsize = use_original_imgsize
+        self.layer3_mode = getattr(args, 'layer3_mode', 'finetune')
+        if self.layer3_mode not in ('finetune', 'finetune-frozen-bn', 'frozen'):
+            raise ValueError('layer3_mode must be finetune, finetune-frozen-bn, or frozen')
         self.support_mask_pooling = getattr(args, 'support_mask_pooling', 'max')
         self.dataset_name = getattr(args, 'benchmark', None)
         if backbone == 'vgg16':
@@ -243,6 +246,8 @@ class VRP_encoder(nn.Module):
         else:
             raise Exception('Unavailable backbone: %s' % backbone)
         self.layer0.eval(), self.layer1.eval(), self.layer2.eval(), self.layer3.eval(), self.layer4.eval()
+        # Set before DDP construction so frozen layer3 needs no gradient reduction.
+        self.layer3.requires_grad_(self.layer3_mode != 'frozen')
         # 保留 layer4 参数供旧 checkpoint 加载；当前预测只使用 layer2/layer3。
         self.layer4.requires_grad_(False)
         if backbone == 'vgg16':
@@ -555,7 +560,9 @@ class VRP_encoder(nn.Module):
         self.train()
         self.apply(fix_bn)
         self.layer0.eval(), self.layer1.eval(), self.layer2.eval()
-        self.layer3.train()
+        self.layer3.train(self.layer3_mode != 'frozen')
+        if self.layer3_mode != 'finetune':
+            self.layer3.apply(fix_bn)
         self.layer4.eval()
 
     def get_pseudo_mask(self, tmp_supp_feat, query_feat_4, mask):

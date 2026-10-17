@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from data.dataset import FSSDataset
 from data.joint import DatasetJoint
-from data.papila import DatasetPAPILA, papila_patient_id
+from data.papila import DatasetPAPILA, papila_patient_id, papila_source_name
 from data.splits.gen_papila_splits import build
 
 
@@ -124,7 +124,7 @@ class PAPILATests(unittest.TestCase):
             self.assertTrue(torch.all(cup <= disc))
             torch.testing.assert_close(label, original)
 
-    def test_batch_shapes_rgb_targets_and_native_size(self):
+    def test_batch_shapes_rgb_targets_and_cache_names(self):
         ds = self.dataset()
         batch = next(iter(DataLoader(ds, batch_size=2, num_workers=0)))
         self.assertEqual(batch['query_img'].shape, (2, 3, 32, 32))
@@ -134,8 +134,31 @@ class PAPILATests(unittest.TestCase):
         self.assertEqual(set(batch['class_id'].tolist()), {0, 1})
         self.assertFalse(torch.equal(batch['query_img'][:, 0], batch['query_img'][:, 1]))
         self.assertEqual(set(batch['query_mask'].unique().tolist()), {0, 1})
-        ds.use_original_imgsize = True
-        self.assertEqual(ds[0]['query_mask'].shape, (16, 20))
+        self.assertTrue(batch['query_name'][0].startswith('papila_fundus_v2_s32__'))
+        self.assertEqual(papila_source_name(batch['query_name'][0]), ds.img_metadata[0])
+        self.assertEqual(ds.read_img(batch['query_name'][0]).size, (20, 16))
+        torch.testing.assert_close(ds.read_mask(batch['query_name'][0]),
+                                   ds.read_mask(ds.img_metadata[0]))
+
+    def test_validation_preprocessing_is_deterministic_without_augmentation(self):
+        ds = self.dataset()
+        before = np.random.get_state()
+        with mock.patch.object(ds, '_augment', side_effect=AssertionError('validation augmented')):
+            first, second = ds[0], ds[0]
+        after = np.random.get_state()
+        torch.testing.assert_close(first['query_img'], second['query_img'], rtol=0, atol=0)
+        torch.testing.assert_close(first['query_mask'], second['query_mask'], rtol=0, atol=0)
+        np.testing.assert_array_equal(before[1], after[1])
+        self.assertEqual(before[2:], after[2:])
+
+    def test_training_uses_fundus_override_instead_of_shared_mri_augmentation(self):
+        ds = self.dataset('trn')
+        with mock.patch('data.medical_base.mr_augment', side_effect=AssertionError('MR path used')), \
+                mock.patch.object(ds, '_augment', wraps=ds._augment) as augment:
+            batch = ds[0]
+        self.assertEqual(augment.call_count, 5)
+        self.assertGreater(batch['query_mask'].sum(), 0)
+        self.assertTrue((batch['support_masks'].flatten(1).sum(1) > 0).all())
 
     def test_class_balance_is_available_only_for_training(self):
         for split in ('trn', 'val'):
@@ -151,6 +174,8 @@ class PAPILATests(unittest.TestCase):
             self.dataset(shot=6)
         with self.assertRaisesRegex(ValueError, 'fold 0'):
             DatasetPAPILA(str(self.root), 1, self.transform, 'trn', 4, False)
+        with self.assertRaisesRegex(ValueError, 'letterboxed'):
+            DatasetPAPILA(str(self.root), 0, self.transform, 'val', 4, True)
 
     def test_registry_joint_class_offsets_and_validation_loader(self):
         FSSDataset.initialize(32, str(self.root), False)

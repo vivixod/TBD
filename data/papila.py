@@ -17,12 +17,21 @@ import scipy.sparse as sp
 import torch
 
 from data.medical_base import MedicalDataset
+from data.papila_augment import PREPROCESS_VERSION, letterbox_fundus, papila_augment
 
 
 SPLIT_ROOT = Path(__file__).resolve().parent / 'splits' / 'lists' / 'papila'
 
 
+def papila_source_name(image_name):
+    """Decode versioned batch/cache names while keeping source lists unchanged."""
+    if image_name.startswith(PREPROCESS_VERSION + '_s'):
+        _, image_name = image_name.split('__', 1)
+    return image_name
+
+
 def papila_patient_id(image_name):
+    image_name = papila_source_name(image_name)
     match = re.fullmatch(r'(RET\d+)(?:OD|OS)', image_name)
     if match is None:
         raise ValueError(f'Invalid PAPILA image name: {image_name!r}')
@@ -62,6 +71,9 @@ class DatasetPAPILA(MedicalDataset):
             raise ValueError('PAPILA has a fixed patient split; use --fold 0')
         if shot < 1:
             raise ValueError('PAPILA shot must be positive')
+        if use_original_imgsize:
+            raise ValueError('PAPILA evaluates in letterboxed input coordinates; '
+                             'use_original_imgsize must be False')
         self.records = load_papila_records(datapath)
         manifest_path = SPLIT_ROOT / 'manifest.json'
         if not manifest_path.is_file():
@@ -80,9 +92,16 @@ class DatasetPAPILA(MedicalDataset):
             name='papila', nclass=2,
             # Natural RGB images; retain the existing ImageNet normalization.
             img_mean=[0.485, 0.456, 0.406], img_std=[0.229, 0.224, 0.225],
-            aug_params=dict(angle=10.0, trans=0.03, contrast=0.1, noise_p=0.0),
             neighbor_prob=0.0,
         )
+        from torchvision import transforms
+        sizes = [step.size for step in self.transform.transforms
+                 if isinstance(step, transforms.Resize)]
+        if len(sizes) != 1 or not isinstance(sizes[0], (tuple, list)) \
+                or len(sizes[0]) != 2 or sizes[0][0] != sizes[0][1]:
+            raise ValueError('PAPILA requires one square Resize in the input transform')
+        self.input_size = int(sizes[0][0])
+        self.cache_prefix = f'{PREPROCESS_VERSION}_s{self.input_size}__'
         expected = {n for n in self.records
                     if papila_patient_id(n) in self.manifest['patients'][self.split_norm]}
         if len(self.img_metadata) != len(set(self.img_metadata)) or set(self.img_metadata) != expected:
@@ -125,6 +144,41 @@ class DatasetPAPILA(MedicalDataset):
     def __getitem__(self, idx):
         return self._load_episode(*self.sample_episode(idx))
 
+    def _augment(self, image, mask):
+        return papila_augment(image, mask)
+
+    def _prepare_frame(self, name):
+        image, mask = self.read_img(name), self.read_mask(name)
+        original_size = image.size
+        image, mask = letterbox_fundus(image, mask, self.input_size)
+        if self.split == 'trn':
+            image, mask = self._augment(image, mask)
+        # Resize is now an identity; Normalize still uses the common RGB path.
+        return self.transform(image), mask, original_size
+
+    def _load_episode(self, query_name, support_names, class_sample):
+        if self.use_original_imgsize:
+            raise ValueError('PAPILA evaluates in letterboxed input coordinates')
+        query_image, query_labels, original_size = self._prepare_frame(query_name)
+        query_mask, query_ignore = self.extract_ignore_idx(query_labels.float(), class_sample)
+        support_images, support_masks, support_ignores = [], [], []
+        for name in support_names:
+            image, labels, _ = self._prepare_frame(name)
+            mask, ignore = self.extract_ignore_idx(labels.float(), class_sample)
+            support_images.append(image)
+            support_masks.append(mask)
+            support_ignores.append(ignore)
+        return {
+            'query_img': query_image, 'query_mask': query_mask,
+            # Changing eval geometry must never reuse an old stretched-image SAM feature.
+            'query_name': self.cache_prefix + papila_source_name(query_name),
+            'query_ignore_idx': query_ignore, 'org_query_imsize': original_size,
+            'support_imgs': torch.stack(support_images),
+            'support_masks': torch.stack(support_masks), 'support_names': support_names,
+            'support_ignore_idxs': torch.stack(support_ignores),
+            'class_id': torch.tensor(class_sample),
+        }
+
     def sample_episode(self, idx):
         if self.split == 'trn':
             balanced = self.sample_class_balanced_query()
@@ -149,10 +203,12 @@ class DatasetPAPILA(MedicalDataset):
         return query_name, supports, class_id
 
     def read_img(self, img_name):
+        img_name = papila_source_name(img_name)
         with Image.open(Path(self.img_path) / self.records[img_name]['image']) as image:
             return image.convert('RGB')
 
     def read_mask(self, img_name):
+        img_name = papila_source_name(img_name)
         sparse = sp.load_npz(Path(self.label_path) / self.records[img_name]['label'])
         if img_name not in self._shape_cache:
             with Image.open(Path(self.img_path) / self.records[img_name]['image']) as image:
@@ -172,4 +228,5 @@ class DatasetPAPILA(MedicalDataset):
         return foreground.float(), torch.zeros_like(mask)
 
     def _label_classes(self, img_name):
+        img_name = papila_source_name(img_name)
         return [0] + [c + 1 for c in self._query_classes[img_name]]

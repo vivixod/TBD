@@ -59,14 +59,57 @@ python data/splits/gen_papila_splits.py --datapath /data/2025Zhutaotao/PAPILA
 - `class_id=1`，`optic_cup`：通道 1。
 
 两者是两个独立的二分类 episode，不要求互斥。也兼容原始两个通道已重叠的输入。
-图片保留 RGB，使用 ImageNet mean/std；训练沿用小角度旋转、平移、对比度扰动，关闭高斯噪声。
+图片保留 RGB，使用 ImageNet mean/std；PAPILA 独立的增强和预处理见下节。
 现有 JSON 没有记录采用哪位专家或何种合并标注，本次沿用下载包提供的标签，不另行假定。
+
+## 眼底专用预处理与增强（fundus_v2）
+
+PAPILA 覆盖自己的 `_augment` 和 episode 图像处理流程，使用 `data/papila_augment.py`，
+不再调用共享的 `mr_augment`。以下幅度是本项目的保守起始设置，尚未经过性能消融。
+原始 [PAPILA 论文](https://www.nature.com/articles/s41597-022-01388-1)也使用过缩放、水平翻转和平移等增强；
+本实现的颜色操作基于 [Torchvision functional/ColorJitter](https://docs.pytorch.org/vision/stable/generated/torchvision.transforms.ColorJitter.html) 提供的变换。
+
+训练与验证都先按原始宽高比缩放，再居中补黑边至 `512×512`，图像用双线性插值、标签用最近邻。
+本地 `2576×1934` 图片会缩为 `512×384`，上下各补 64 像素。整个过程保留全图，
+不根据 query GT 定位或裁剪；输出像素尺寸取整会有正常的亚像素比例误差。
+随后在这个输入尺度上做训练增强，避免在 500 万像素原图上重复进行颜色/仿射变换。
+
+| 操作 | 参数 | 应用方式 |
+| --- | --- | --- |
+| 水平翻转 | 概率 0.5 | 图像、标签同步；分割类别没有左右眼类别之分 |
+| 旋转 | ±15° | 与下述平移、缩放合成一次仿射 |
+| 平移 | 宽/高的 ±3% | 图像、标签同步 |
+| 缩放 | 0.9–1.1 倍 | x/y 使用相同尺度 |
+| 亮度 | 0.85–1.15 倍 | 颜色增强整体以 0.8 概率启用 |
+| 对比度 | 0.85–1.15 倍 | 与其他颜色操作随机排序 |
+| 饱和度 | 0.9–1.1 倍 | 只改图像 |
+| 色相 | ±0.01 | 只改图像；在 Normalize 前执行 |
+| Gamma | 0.9–1.1 | 概率 0.3，只改图像 |
+
+query 与每个 support 独立增强，每张图像和自己的标签严格共享几何变换。
+训练时使用标签检查变换后的前景框是否完整位于画布内，以及原来存在的视盘/视杯标签是否仍然存在；
+最多尝试 8 次，全部不合格时回退到仅翻转后的图像，继续应用颜色增强。
+颜色操作不修改 mask，并保持原来纯黑的背景和填充区域为零。
+不启用高斯噪声、垂直翻转、随机裁剪、擦除或弹性形变。
+
+验证只进行确定性的等比例缩放、补边及 RGB 归一化，不执行随机增强。
+由于评估坐标包含补边，PAPILA 使用 `use_original_imgsize=False`，不支持直接切换为原图坐标 GT。
+原始文件读取 `read_img/read_mask` 仍保留原始尺寸，可用于离线分析。
+
+**SAM 缓存隔离**：batch 中 query 名带预处理版本和输入尺寸，如
+`papila_fundus_v2_s512__RET002OD`。现有 SAM 接口会自然写入对应的独立缓存文件，
+不会读到旧版 `RET002OD.npy` 的直接拉伸特征。原始 split 和 support 名字保持不变，
+`read_img/read_mask/papila_patient_id` 也支持识别版本化 query 名。
+训练继续在线编码实际增强后的图像。缓存首次生成的成本由新预处理对应的 query 数量决定。
+
+这是一次预处理和训练增强协议更新；新启动的 PAPILA 实验会自动使用它。
+已经在运行的 Python 进程不会自动载入这些修改，旧 checkpoint 的输入预处理也需要按对应版本区分。
 
 ## 训练入口
 
 已注册 `papila`，支持 `--benchmark papila` 和联合训练里的 `papila:/path/to/PAPILA`。
-`train_joint_papila.sh` 提供 BTCV + AMOS MR + PAPILA + BraTS 的独立入口，使用已有训练选项，
-原 `train_joint.sh` 的默认四数据集组合保留。新入口默认权重 `1,1,1,1.5`，PAPILA 不继承 ADAM 的权重 2。
+`train_joint.sh` 默认使用 BTCV + AMOS MR + PAPILA + BraTS；`train_joint_papila.sh` 仍可作为同组合的入口。
+两者默认权重均为 `1,1,1,1.5`，PAPILA 不继承 ADAM 的权重 2。
 可用 `JOINT_SUBDATASETS`、`JOINT_WEIGHTS` 覆盖。
 
 若延续当前全局 max pooling、两处 attention mask、quality 融合设置：
@@ -76,7 +119,7 @@ conda activate vrpsam
 cd /data/2025Zhutaotao/TBD
 GPU_ID=1,2 SUPPORT_MASK_POOLING=max \
 BBOX_SUPPORT_ATTN_MASK=1 ICL_SUPPORT_ATTN_MASK=1 SUPPORT_FUSION=quality \
-bash train_joint_papila.sh
+bash train_joint.sh
 ```
 
 不传 attention / fusion 环境变量时，复用现有默认值（两处 mask 关闭、mean 融合）。
@@ -89,5 +132,13 @@ CPU 单元测试覆盖患者分离、同类异患者 support、验证固定组�
 RGB/batch 输出、类别均衡、联合注册与启动参数，不会启动 GPU 训练：
 
 ```bash
-python -m unittest discover -s tests -p test_papila.py -v
+python -m unittest discover -s tests -p 'test_papila*.py' -v
+python -m unittest discover -s tests -p test_sam_cache_alignment.py -v
 ```
+
+2026-10-17 的 CPU 检查：PAPILA/专用增强 19 项、SAM 缓存对齐 12 项、原四数据集采样回归 7 项全部通过。
+遍历本地全部 488 张图片进行 512 输入预处理，原有视盘/视杯标签均未消失；
+对 65 张训练图片抽取 325 次随机增强，未出现视盘或视杯消失，二者包含关系保持成立。
+全量预处理后最小完整视盘为 3224 像素，最小视杯为 56 像素。
+检查明细与三组全图预览位于 `analysis/papila_augmentation_20261017/audit.json`、`preview.png`。
+这些验证检查数据与几何一致性，分割精度收益仍需训练实验确认。

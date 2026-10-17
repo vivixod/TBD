@@ -113,6 +113,22 @@ class CacheAlignmentTests(unittest.TestCase):
             torch.testing.assert_close(logits, torch.ones_like(logits))
         self.assertEqual(self.model.sam_model.image_encoder.batch_sizes, [1, 1, 1])
 
+    def test_papila_letterbox_version_does_not_reuse_stretched_image_cache(self):
+        from data.papila_augment import PREPROCESS_VERSION
+        self.model.eval()
+        self.saved.parent.mkdir()
+        old = self.saved.parent / 'RET002OD.npy'
+        np.save(old, np.zeros((1, 256, 64, 64), dtype=np.float32))
+        original_bytes = old.read_bytes()
+        name = f'{PREPROCESS_VERSION}_s8__RET002OD'
+        first, _ = self.model(self.image, [name], self.protos)
+        second, _ = self.model(self.image, [name], self.protos)
+        torch.testing.assert_close(first, torch.ones_like(first))
+        torch.testing.assert_close(first, second)
+        self.assertEqual(self.model.sam_model.image_encoder.batch_sizes, [1])
+        self.assertTrue((self.saved.parent / (name + '.npy')).exists())
+        self.assertEqual(old.read_bytes(), original_bytes)
+
     def test_multishot_encodes_unique_queries_and_preserves_order_and_gradients(self):
         self.model.train()
         image = torch.cat([self.image, self.image * 2])

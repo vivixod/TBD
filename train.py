@@ -412,6 +412,10 @@ if __name__ == '__main__':
     parser.add_argument('--local-rank', '--local_rank', type=int, default=-1, help='number of cpu threads to use during batch generation')
     parser.add_argument('--num_query', type=int, default=50)
     parser.add_argument('--backbone', type=str, default='resnet50', choices=['vgg16', 'resnet50', 'resnet101', 'convnext_tiny', 'RadImageNet'])
+    parser.add_argument('--layer3-mode', choices=['finetune', 'finetune-frozen-bn', 'frozen'],
+                        default='finetune',
+                        help='Backbone layer3: legacy finetuning with updating BN stats, '
+                             'finetuning with fixed BN stats, or fully frozen weights and stats.')
     parser.add_argument('--shot', type=int, default=2)
     parser.add_argument('--bbox_loss_weight', type=float, default=0.5,
                         help='weight of the bbox token MSE loss (token-space supervision). 0 disables it.')
@@ -489,7 +493,7 @@ if __name__ == '__main__':
     for param in model.module.layer2.parameters():
         param.requires_grad = False
     for param in model.module.layer3.parameters():
-        param.requires_grad = True
+        param.requires_grad = args.layer3_mode != 'frozen'
     for param in model.module.layer4.parameters():
         param.requires_grad = False
         
@@ -502,7 +506,8 @@ if __name__ == '__main__':
     param_groups.append({'params': model.module.merge_1.parameters(), 'lr': args.lr})
 
     # 2. 微调参与预测的 layer3（低学习率）；layer4 仅保留供旧 checkpoint 加载
-    param_groups.append({'params': model.module.layer3.parameters(), 'lr': args.lr * 0.01})
+    if args.layer3_mode != 'frozen':
+        param_groups.append({'params': model.module.layer3.parameters(), 'lr': args.lr * 0.01})
 
     # 3. SAM 模块（较低学习率）
     param_groups.append({'params': sam_model.module.parameters(), 'lr': args.lr * 0.1})
@@ -527,6 +532,11 @@ if __name__ == '__main__':
 
     # 【启动检查】requires_grad=True 但未注册进 optimizer 的参数（主进程打印一次）
     if utils.is_main_process():
+        layer3_trainable = sum(p.numel() for p in model.module.layer3.parameters()
+                               if p.requires_grad)
+        Logger.info(f'[Backbone] layer3_mode={args.layer3_mode}; '
+                    f'layer3_trainable_params={layer3_trainable}; '
+                    f'BN_running_stats={"updating" if args.layer3_mode == "finetune" else "fixed"}')
         optimized_ids = {id(p) for g in optimizer.param_groups for p in g['params']}
         missing = [n for n, p in model.module.named_parameters()
                    if p.requires_grad and id(p) not in optimized_ids]

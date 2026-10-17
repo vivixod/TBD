@@ -176,7 +176,7 @@ class AttentionLauncherTests(unittest.TestCase):
                     args = json.loads(result.stdout.splitlines()[-1])
                     self.assertEqual(args[args.index('--bbox-support-attn-mask') + 1], str(bbox))
                     self.assertEqual(args[args.index('--icl-support-attn-mask') + 1], str(icl))
-                    expected = 'trn_joint4_shot4_cb0.5_poolmax'
+                    expected = 'trn_joint4_papila_shot4_cb0.5_poolmax'
                     if bbox or icl:
                         expected += f'_bboxm{bbox}_iclm{icl}'
                     self.assertEqual(args[args.index('--logpath') + 1], expected)
@@ -196,7 +196,7 @@ class AttentionLauncherTests(unittest.TestCase):
                 args = json.loads(result.stdout.splitlines()[-1])
                 self.assertEqual(args[args.index('--support-mask-pooling') + 1], policy)
                 self.assertEqual(args[args.index('--logpath') + 1],
-                                 'trn_joint4_shot4_cb0.5_pool' + policy)
+                                 'trn_joint4_papila_shot4_cb0.5_pool' + policy)
             env['SUPPORT_MASK_POOLING'] = 'invalid'
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                     env=env, capture_output=True, text=True)
@@ -227,7 +227,7 @@ class AttentionLauncherTests(unittest.TestCase):
                                 ('--fusion-warmup-epochs', '2'), ('--fusion-ramp-epochs', '3')]:
                 self.assertEqual(args[args.index(flag) + 1], value)
             self.assertEqual(args[args.index('--logpath') + 1],
-                             'trn_joint4_shot4_cb0.5_poolmax_bboxm1_iclm1_fusionquality_qw0.1_qt0.2_fw2_fr3')
+                             'trn_joint4_papila_shot4_cb0.5_poolmax_bboxm1_iclm1_fusionquality_qw0.1_qt0.2_fw2_fr3')
             env['SUPPORT_FUSION'] = 'invalid'
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                     env=env, capture_output=True, text=True)
