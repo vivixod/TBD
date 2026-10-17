@@ -387,7 +387,7 @@ if __name__ == '__main__':
     # Arguments parsing
     parser = argparse.ArgumentParser(description='Visual Prompt Encoder Pytorch Implementation')
     parser.add_argument('--datapath', type=str, default='/root/paddlejob/workspace/env_run/datsets/')
-    parser.add_argument('--benchmark', type=str, default='coco', choices=['pascal', 'coco', 'fss', 'btcv', 'btcv2', 'amos', 'joint'])
+    parser.add_argument('--benchmark', type=str, default='coco', choices=['pascal', 'coco', 'fss', 'btcv', 'btcv2', 'amos', 'papila', 'joint'])
     parser.add_argument('--joint-subdatasets', type=str, default='',
                         help='联合训练子数据集列表，逗号分隔，格式：name:datapath[,name:datapath,...]。仅当 --benchmark joint 时生效。')
     parser.add_argument('--n-episodes', type=int, default=4000,
@@ -592,6 +592,8 @@ if __name__ == '__main__':
             Logger.info(f'[Sampling] {ds.benchmark}: class-first probability='
                         f'{getattr(ds, "class_balance_prob", 0.0):.2f}, '
                         f'query pools: {pool_sizes or "original query-first"}; validation unchanged')
+            if getattr(ds, 'support_sampling', None):
+                Logger.info(f'[Support sampling] {ds.benchmark}: {ds.support_sampling}')
 
     # joint 模式 val 按子数据集分别构造 DataLoader（每个子集单独出 mIoU，最后算 macro）
     if args.benchmark == 'joint':

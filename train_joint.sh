@@ -39,7 +39,8 @@ case "$BBOX_SUPPORT_ATTN_MASK:$ICL_SUPPORT_ATTN_MASK" in
     0:0|0:1|1:0|1:1) ;;
     *) echo "BBOX_SUPPORT_ATTN_MASK and ICL_SUPPORT_ATTN_MASK must be 0 or 1" >&2; exit 2 ;;
 esac
-DEFAULT_EXPERIMENT_NAME=trn_joint4_shot4_cb${CLASS_BALANCE_PROB}_pool${SUPPORT_MASK_POOLING}
+EXPERIMENT_PREFIX=${EXPERIMENT_PREFIX:-trn_joint4}
+DEFAULT_EXPERIMENT_NAME=${EXPERIMENT_PREFIX}_shot4_cb${CLASS_BALANCE_PROB}_pool${SUPPORT_MASK_POOLING}
 if [ "$BBOX_SUPPORT_ATTN_MASK:$ICL_SUPPORT_ATTN_MASK" != "0:0" ]; then
     DEFAULT_EXPERIMENT_NAME=${DEFAULT_EXPERIMENT_NAME}_bboxm${BBOX_SUPPORT_ATTN_MASK}_iclm${ICL_SUPPORT_ATTN_MASK}
 fi
@@ -51,11 +52,11 @@ FREE_PORT=$(python3 -c "import socket; s=socket.socket(); s.bind(('',0)); print(
 echo "Using free port: $FREE_PORT"
 
 # 子数据集列表：name:datapath（逗号分隔），新增数据集只需在这里追加
-JOINT_SUBDATASETS="btcv2:/data/2025Zhutaotao/BTCV,amos:/data/2025Zhutaotao/AMOS2022_MR,adam:/data/2025Zhutaotao/ADAM2020,brats:/data/2025Zhutaotao/BraTS2019"
+JOINT_SUBDATASETS=${JOINT_SUBDATASETS:-"btcv2:/data/2025Zhutaotao/BTCV,amos:/data/2025Zhutaotao/AMOS2022_MR,adam:/data/2025Zhutaotao/ADAM2020,brats:/data/2025Zhutaotao/BraTS2019"}
 
 # 采样权重（长度=数据集数，逗号分隔；留空则均匀）
 # 非均匀：adam 小体量难任务高权重、brats 次之（学 MASS 数据集级加权思路）
-JOINT_WEIGHTS="1,1,2,1.5"
+JOINT_WEIGHTS=${JOINT_WEIGHTS-"1,1,2,1.5"}
 
 CUDA_VISIBLE_DEVICES=${GPU_ID} python3 -m torch.distributed.launch \
         --nproc_per_node="${NPROC_PER_NODE}" \

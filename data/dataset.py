@@ -11,6 +11,7 @@ from data.btcv import DatasetBTCV,DatasetBTCV2
 from data.amos import DatasetAMOS
 from data.adam import DatasetAdam
 from data.brats import DatasetBraTS
+from data.papila import DatasetPAPILA
 from data.joint import DatasetJoint
 from data.episode_sampling import configure_class_balance
 # from data.coco2pascal import DatasetCOCO2PASCAL
@@ -40,6 +41,7 @@ class FSSDataset:
             'amos': DatasetAMOS,
             'adam': DatasetAdam,
             'brats': DatasetBraTS,
+            'papila': DatasetPAPILA,
             'joint': DatasetJoint,
             # 'coco2pascal': DatasetCOCO2PASCAL
         }

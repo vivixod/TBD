@@ -177,6 +177,10 @@ class MedicalDataset(ClassBalancedQueryMixin, Dataset):
         idx %= len(self.img_metadata)
 
         query_name, support_names, class_sample = self.sample_episode(idx)
+        return self._load_episode(query_name, support_names, class_sample)
+
+    def _load_episode(self, query_name, support_names, class_sample):
+        """Load/augment an episode; datasets may define their own episode indexing."""
         query_img, query_cmask, support_imgs, support_cmasks, org_qry_imsize = \
             self.load_frame(query_name, support_names)
 
