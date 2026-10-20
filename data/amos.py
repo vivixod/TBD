@@ -79,7 +79,8 @@ class DatasetAMOS(ClassBalancedQueryMixin, Dataset):
         val/sub_class_file_list_0.txt
 
     Split 设计：x+y 混合 36 patients 按 8:2 patient-level 划分（seed=321），
-    稀有类（膀胱/前列腺）固定 1 患者进 val（生成脚本 data/splits/gen_splits.py）。
+    稀有类（膀胱/前列腺与子宫）固定 1 患者进 val（生成脚本 data/splits/gen_splits.py），
+    但这两类不参与训练目标采样和评估；仅使用原始标签 1~13。
     """
 
     def __init__(self, datapath, fold, transform, split, shot, use_original_imgsize, neighbor_prob=0.0):
@@ -88,7 +89,7 @@ class DatasetAMOS(ClassBalancedQueryMixin, Dataset):
         self.split = 'val' if split in ['val', 'test'] else 'trn'
         self.fold = fold
         self.nfolds = 4
-        self.nclass = 15                     # AMOS 0~14 共 15 类
+        self.nclass = 15                     # 保留原始标签 ID 空间；有效类别由 class_ids 指定
         self.benchmark = 'amos'
         self.shot = shot
         self.use_original_imgsize = use_original_imgsize
@@ -318,8 +319,9 @@ class DatasetAMOS(ClassBalancedQueryMixin, Dataset):
         return list(np.random.choice(valid, size=k, replace=False))
 
     def build_class_ids(self):
-        # AMOS 不分 fold 类，全 15 类都参与训练+验证
-        return list(range(self.nclass))
+        # 原始标签 14=bladder、15=prostate_and_uterus 在每个 split 仅有一位患者。
+        # 训练采样和评估均仅使用零基 ID 0~12，标签与 joint 全局偏移不重编号。
+        return list(range(13))
 
     def build_img_metadata(self):
         # 从 train/val 子目录里的 data_list_0.txt 读 2D 切片名

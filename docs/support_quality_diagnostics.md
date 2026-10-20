@@ -18,7 +18,8 @@ python diagnose_support_quality.py \
 从 checkpoint 配置读取池化、attention、shot、seed、相邻 support 等参数。
 按当前验证 rank 数回放每个数据集的 1000 episodes，保存实际抽到的 support。
 随后去重 query/class，并在推理之前按患者和目标大小选取每类最多 12 个 query。
-覆盖 BTCV 13 类、AMOS 15 类、ADAM 2 类、BraTS 3 类。
+覆盖 BTCV 13 类、AMOS 13 类、ADAM 2 类、BraTS 3 类。
+AMOS 按当前数据集的有效类别列表采样，排除膀胱和前列腺/子宫；历史 15 类诊断需单独报告。
 
 明确排除 query 自己作为 support、缩放后 query GT 为空、SAM 缓存缺失的候选；
 每类的排除数量、实际样本和患者数记录在 `coverage.csv`。

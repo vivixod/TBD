@@ -4,7 +4,7 @@
 
 ## 主要扩展
 
-- **E-ICL 双路检索**：query-support 做 patch 级显式检索，前景证据 `R_fg = A @ (M_s ⊙ K)` 与背景解剖上下文 `R_bg = A @ ((1-M_s) ⊙ K)` 解耦（`model/base/eicl_interaction.py`）
+- **E-ICL 显式检索**：query-support 做 patch 级匹配，生成 `pseudo=A@M_s` 与图像检索特征 `A@normalized(Fs)`（`model/base/eicl_interaction.py`）
 - **52 tokens 喂 SAM**：50 个上下文 token + 2 个 bbox token 作为 SAM sparse prompt；bbox token 在 token 空间用 MSE 监督（`--bbox_loss_weight`）
 - **联合训练（joint）**：支持 N 个子数据集联合训练，每个 episode 的 support/query 只来自同一子数据集（`data/joint.py`）
 - **patient-level 划分**：8:2 按患者切分；稀有类（出现患者数 ≤2）保证 train/val 各至少 1 患者
@@ -16,9 +16,14 @@
 | 数据集 | 路径示例 | 类数 | patients |
 |---|---|---|---|
 | BTCV | `image/x/` + `mask/` PNG | 13 | — |
-| AMOS2022_MR | `image/{x,y}/` + `label/*.npz` | 15 | 36 |
+| AMOS2022_MR | `image/{x,y}/` + `label/*.npz` | 13（原始标签 15） | 36 |
 | ADAM2020 | `image/x/` + `label/*.npz` | 2 | 14 |
 | BraTS2019 | `image/x/` + `label/*.npz` | 3 | 302 |
+
+AMOS 仅使用原始标签 1–13（零基类别 ID 0–12）。膀胱（标签 14）和前列腺/子宫
+（标签 15）在训练、验证分区各只有一位患者，不再作为 episode 目标，也不计入
+Dice、mIoU、FB-IoU 或逐类报告。原始标注、患者 split 和其他类别编号保持不变。
+修改对新启动的进程生效；历史 AMOS 15 类结果需与当前 13 类结果区分报告。
 
 生成 split 列表（patient-level 8:2，seed=321）：
 
