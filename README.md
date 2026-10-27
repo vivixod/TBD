@@ -4,6 +4,8 @@
 
 ## 主要扩展
 
+- **跨患者 support 检索**：体数据集排除 query 患者后选图像特征最相似的4张，PAPILA 保持异患者采样；训练前自动准备索引，详见 [使用说明](docs/support_retrieval.md)。
+
 - **E-ICL 显式检索**：query-support 做 patch 级匹配，生成 `pseudo=A@M_s` 与图像检索特征 `A@normalized(Fs)`（`model/base/eicl_interaction.py`）
 - **52 tokens 喂 SAM**：50 个上下文 token + 2 个 bbox token 作为 SAM sparse prompt；bbox token 在 token 空间用 MSE 监督（`--bbox_loss_weight`）
 - **联合训练（joint）**：支持 N 个子数据集联合训练，每个 episode 的 support/query 只来自同一子数据集（`data/joint.py`）
@@ -47,7 +49,7 @@ python -m torch.distributed.launch --nproc_per_node=1 train.py \
     --benchmark joint \
     --joint-subdatasets "btcv2:/path/BTCV,amos:/path/AMOS2022_MR" \
     --backbone resnet50 --shot 1 --fold 0 --condition mask \
-    --num_query 50 --epochs 300 --lr 1e-4 --bsz 1
+    --num_query 50 --epochs 100 --lr 1e-4 --bsz 1
 ```
 
 SAM 特征与 query 增强保持一致：训练时在线编码增强后的 query，同一 query 的多张

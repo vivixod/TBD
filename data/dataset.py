@@ -14,6 +14,7 @@ from data.brats import DatasetBraTS
 from data.papila import DatasetPAPILA
 from data.joint import DatasetJoint
 from data.episode_sampling import configure_class_balance
+from data.support_retrieval import configure_support_sampling
 # from data.coco2pascal import DatasetCOCO2PASCAL
 
 
@@ -58,7 +59,8 @@ class FSSDataset:
     @classmethod
     def build_dataloader(cls, benchmark, bsz, nworker, fold, split, shot=1,
                          joint_subdatasets=None, n_episodes=None, sub_weights=None,
-                         neighbor_prob=0.0, class_balance_prob=0.0):
+                         neighbor_prob=0.0, class_balance_prob=0.0,
+                         support_sampling='random', support_retrieval_dir=None):
         # Force randomness during training for diverse episode combinations
         # Freeze randomness during testing for reproducibility
         shuffle = split == 'trn'
@@ -79,6 +81,8 @@ class FSSDataset:
         else:
             dataset = cls.datasets[benchmark](cls.datapath, fold=fold, transform=cls.transform, split=split, shot=shot, use_original_imgsize=cls.use_original_imgsize, neighbor_prob=neighbor_prob)
             configure_class_balance(dataset, class_balance_prob if split == 'trn' else 0.0)
+        for sub_dataset in getattr(dataset, 'sub_datasets', [dataset]):
+            configure_support_sampling(sub_dataset, support_sampling, support_retrieval_dir)
         # print(f"[DEBUG-dataset] build_dataloader: {benchmark} {split} shot={shot} "
         #       f"dataset构建完成 len={len(dataset)}", flush=True)
         if split == 'trn':

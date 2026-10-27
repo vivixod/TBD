@@ -28,6 +28,7 @@ import os
 import numpy as np
 from torch.utils.data import Dataset
 from data.episode_sampling import configure_class_balance
+from data.support_retrieval import configure_support_sampling
 
 # 避免循环 import：FSSDataset 仅在方法内部延迟导入
 # （FSSDataset.datasets 也在方法内通过 'data.dataset.FSSDataset' 路径访问）
@@ -176,7 +177,8 @@ class DatasetJoint(Dataset):
             use_original_imgsize=use_original_imgsize,
         )
     @classmethod
-    def build_val_dataloaders(cls, bsz, nworker, joint_subdatasets, shot=1, neighbor_prob=0.0):
+    def build_val_dataloaders(cls, bsz, nworker, joint_subdatasets, shot=1, neighbor_prob=0.0,
+                             support_sampling='random', support_retrieval_dir=None):
         r""" 验证阶段按子数据集分别出 val DataLoader。
 
         返回 OrderedDict[(name, datapath)] -> DataLoader，
@@ -209,6 +211,7 @@ class DatasetJoint(Dataset):
                 use_original_imgsize=FSSDataset.use_original_imgsize,
                 neighbor_prob=neighbor_prob,
             )
+            configure_support_sampling(ds, support_sampling, support_retrieval_dir)
             sampler = None
             try:
                 sampler = torch.utils.data.distributed.DistributedSampler(ds, shuffle=False)

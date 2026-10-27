@@ -8,6 +8,7 @@ from common.logger import Logger, AverageMeter
 from common.evaluation import Evaluator
 from common import utils
 from data.dataset import FSSDataset
+from data.support_retrieval import DEFAULT_RETRIEVAL_DIR, SUPPORT_SAMPLING_MODES
 from SAM2pred import SAM_pred
 
 def test(args, model, sam_model, dataloader):
@@ -62,6 +63,8 @@ if __name__ == '__main__':
                         help='Match the ICL support-attention setting used for training.')
     parser.add_argument('--support-fusion', choices=['mean', 'quality'], default=None,
                         help='Default: infer from checkpoint; explicit mode must match saved parameters.')
+    parser.add_argument('--support-sampling', choices=SUPPORT_SAMPLING_MODES, default=None)
+    parser.add_argument('--support-retrieval-dir', default=None)
     args = parser.parse_args()
 
     # 环境设置 (单卡测试)
@@ -72,6 +75,10 @@ if __name__ == '__main__':
     print(f"==> Loading weights from {args.load}")
     ckpt = torch.load(args.load, map_location='cpu', weights_only=True)
     args.support_fusion = checkpoint_fusion_mode(ckpt, args.support_fusion)
+    saved_config = ckpt.get('config', {}) if isinstance(ckpt, dict) else {}
+    args.support_sampling = args.support_sampling or saved_config.get('support_sampling', 'random')
+    args.support_retrieval_dir = args.support_retrieval_dir or saved_config.get(
+        'support_retrieval_dir', str(DEFAULT_RETRIEVAL_DIR))
     print(f'==> support fusion: {args.support_fusion} (saved mix is restored)')
     model = VRP_encoder(args, args.backbone, False)
     sam_model = SAM_pred()
@@ -111,7 +118,9 @@ if __name__ == '__main__':
         nworker=args.nworker, 
         fold=0, 
         split='val', # 使用 val 逻辑
-        shot=args.shot
+        shot=args.shot,
+        support_sampling=args.support_sampling,
+        support_retrieval_dir=args.support_retrieval_dir
     )
 
     Evaluator.initialize(args)

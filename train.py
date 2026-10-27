@@ -22,6 +22,7 @@ from common.logger import Logger, AverageMeter
 from common.evaluation import Evaluator
 from common import utils
 from data.dataset import FSSDataset
+from data.support_retrieval import DEFAULT_RETRIEVAL_DIR, SUPPORT_SAMPLING_MODES
 from SAM2pred import SAM_pred
 
 
@@ -396,6 +397,11 @@ if __name__ == '__main__':
                         help='joint 各子数据集采样权重，逗号分隔（如 1,1,1,1）；留空则均匀。长度须等于子数据集数。')
     parser.add_argument('--neighbor-prob', type=float, default=0.0,
                         help='support 采样中同患者相邻切片占比（0=关闭；1.0=全部相邻，任务难度下界，诊断用）')
+    parser.add_argument('--support-sampling', choices=SUPPORT_SAMPLING_MODES, default='random',
+                        help='Legacy random/neighbor sampling, strict cross-patient random, '
+                             'or image-similarity Top-K across all other-patient slices. PAPILA keeps its native rule.')
+    parser.add_argument('--support-retrieval-dir', default=str(DEFAULT_RETRIEVAL_DIR),
+                        help='Prepared split-local support ranking cache directory.')
     parser.add_argument('--class-balance-prob', type=float, default=0.0,
                         help='Training-only probability of class-first query sampling: '
                              '0=original, 0.5=mixed, 1=uniform classes. Validation is unchanged.')
@@ -403,7 +409,7 @@ if __name__ == '__main__':
     parser.add_argument('--bsz', type=int, default=2) # batch size = num_gpu * bsz default num_gpu = 4
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--weight_decay', type=float, default=1e-6)
-    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--nworker', type=int, default=8)
     parser.add_argument('--seed', type=int, default=321)
     parser.add_argument('--fold', type=int, default=0, choices=[0, 1, 2, 3])
@@ -439,6 +445,8 @@ if __name__ == '__main__':
     parser.add_argument('--fusion-warmup-epochs', type=int, default=2)
     parser.add_argument('--fusion-ramp-epochs', type=int, default=3)
     args = parser.parse_args()
+    if args.support_sampling != 'random':
+        args.neighbor_prob = 0.0
     if not 0.0 <= args.class_balance_prob <= 1.0:
         parser.error('--class-balance-prob must be between 0 and 1')
     if not math.isfinite(args.fusion_quality_weight) or args.fusion_quality_weight < 0:
@@ -578,7 +586,9 @@ if __name__ == '__main__':
     dataloader_trn = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'trn', shot=args.shot, joint_subdatasets=joint_sub,
                                                  n_episodes=args.n_episodes, sub_weights=joint_weights,
                                                  neighbor_prob=args.neighbor_prob,
-                                                 class_balance_prob=args.class_balance_prob)
+                                                 class_balance_prob=args.class_balance_prob,
+                                                 support_sampling=args.support_sampling,
+                                                 support_retrieval_dir=args.support_retrieval_dir)
     if utils.is_main_process():
         pooling_rules = {'max': 'all=adaptive_max_pool2d', 'nearest': 'all=nearest',
                          'adam-only': 'ADAM=adaptive_max_pool2d, others=nearest'}
@@ -595,6 +605,10 @@ if __name__ == '__main__':
                     'query attention and EICL A@M unchanged')
         datasets = getattr(dataloader_trn.dataset, 'sub_datasets', [dataloader_trn.dataset])
         for ds in datasets:
+            mode = getattr(ds, 'support_sampling_mode', 'random')
+            cache = getattr(getattr(ds, 'support_retriever', None), 'path', 'none')
+            Logger.info(f'[Support selection] {ds.benchmark}: mode={mode}; cache={cache}; '
+                        'similarity=cross-patient global Top-K, no per-patient quota')
             available = getattr(ds, 'balanced_class_ids', ())
             names = {c: name for c, name in zip(ds.class_ids, getattr(ds, 'class_names', []))}
             pools = getattr(ds, 'class_query_pools', {})
@@ -609,9 +623,13 @@ if __name__ == '__main__':
     if args.benchmark == 'joint':
         from data.joint import DatasetJoint as _DJ
         val_loaders = _DJ.build_val_dataloaders(args.bsz, args.nworker, joint_sub, shot=args.shot,
-                                                neighbor_prob=args.neighbor_prob)
+                                                neighbor_prob=args.neighbor_prob,
+                                                support_sampling=args.support_sampling,
+                                                support_retrieval_dir=args.support_retrieval_dir)
     else:
-        dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val', shot=args.shot, joint_subdatasets=joint_sub, neighbor_prob=args.neighbor_prob)
+        dataloader_val = FSSDataset.build_dataloader(args.benchmark, args.bsz, args.nworker, args.fold, 'val', shot=args.shot, joint_subdatasets=joint_sub, neighbor_prob=args.neighbor_prob,
+                                                    support_sampling=args.support_sampling,
+                                                    support_retrieval_dir=args.support_retrieval_dir)
         val_loaders = None
 
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max= args.epochs * len(dataloader_trn))

@@ -123,7 +123,8 @@ class Layer3ModeTests(unittest.TestCase):
                               '  echo 12345\nelse\n  printf "%s\\n" "$@"\nfi\n')
             python.chmod(0o755)
             env = os.environ.copy()
-            env.update(PATH=tmp + os.pathsep + env.get('PATH', ''), GPU_ID='1,2')
+            env.update(PATH=tmp + os.pathsep + env.get('PATH', ''), GPU_ID='1,2',
+                       SUPPORT_SAMPLING='random', EPOCHS='100')
             env.pop('EXPERIMENT_NAME', None)
             for mode in ('finetune', 'finetune-frozen-bn', 'frozen'):
                 with self.subTest(mode=mode):
@@ -133,7 +134,10 @@ class Layer3ModeTests(unittest.TestCase):
                     args = run.stdout.splitlines()
                     self.assertEqual(args[args.index('--layer3-mode') + 1], mode)
                     logpath = args[args.index('--logpath') + 1]
-                    self.assertEqual(logpath.endswith('_l3' + mode), mode != 'finetune')
+                    self.assertTrue(logpath.endswith('_ep100'))
+                    self.assertEqual(args[args.index('--epochs') + 1], '100')
+                    self.assertEqual(logpath.removesuffix('_ep100').endswith('_l3' + mode),
+                                     mode != 'finetune')
             env['LAYER3_MODE'] = 'invalid'
             run = subprocess.run(['sh', 'train_joint.sh'], cwd=ROOT, env=env,
                                  text=True, capture_output=True)

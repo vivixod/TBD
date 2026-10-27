@@ -132,6 +132,8 @@ def log_config(checkpoint, overrides):
     config = dict(num_query=int(params.get('num_query', 50)), backbone=params.get('backbone', 'resnet50'),
                   shot=int(params.get('shot', 4)), seed=int(params.get('seed', 321)),
                   neighbor_prob=float(params.get('neighbor_prob', 1)), support_mask_pooling=pooling,
+                  support_sampling=params.get('support_sampling', 'random'),
+                  support_retrieval_dir=params.get('support_retrieval_dir'),
                   bbox_support_attn_mask=int(params.get('bbox_support_attn_mask', 0)),
                   icl_support_attn_mask=int(params.get('icl_support_attn_mask', 0)),
                   support_fusion=params.get('support_fusion', 'mean'), benchmark='joint')
@@ -144,12 +146,15 @@ def log_config(checkpoint, overrides):
 
 def datasets(args, config):
     from data.dataset import FSSDataset
+    from data.support_retrieval import configure_support_sampling
     FSSDataset.initialize(512, args.btcv_root, False)
     result = {}
     for name, path in [('adam', args.adam_root), ('btcv2', args.btcv_root)]:
         result[name] = FSSDataset.datasets[name](
             path, 0, FSSDataset.transform, 'val', config['shot'], False,
             neighbor_prob=config['neighbor_prob'])
+        configure_support_sampling(result[name], config.get('support_sampling', 'random'),
+                                   config.get('support_retrieval_dir'))
     return result
 
 
@@ -209,6 +214,7 @@ def prepare_manifest(ds_map, config, args):
                 row['id'] = f'{len(episodes):03d}_{row["dataset"]}_{row["class_name"]}'
                 episodes.append(row)
     return dict(seed=config['seed'], shot=config['shot'], neighbor_prob=config['neighbor_prob'],
+                support_sampling=config.get('support_sampling', 'random'),
                 validation_ranks=args.validation_ranks,
                 selection='Unique query/class, area-stratified; actual val support draws, prefer no self-support',
                 episodes=episodes)
@@ -449,7 +455,8 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     ds_map = datasets(args, config)
     manifest = json.loads(args.manifest.read_text()) if args.manifest else prepare_manifest(ds_map, config, args)
-    if manifest['shot'] != config['shot'] or manifest['neighbor_prob'] != config['neighbor_prob']:
+    if (manifest['shot'] != config['shot'] or manifest['neighbor_prob'] != config['neighbor_prob']
+            or manifest.get('support_sampling', 'random') != config.get('support_sampling', 'random')):
         raise ValueError('Manifest support protocol does not match the checkpoint log')
     if args.limit is not None:
         manifest['episodes'] = manifest['episodes'][:args.limit]

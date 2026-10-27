@@ -276,6 +276,9 @@ class DatasetAMOS(ClassBalancedQueryMixin, Dataset):
             valid_classes = [c - 1 for c in label_class if c - 1 in self.class_ids]
             class_sample = int(np.random.choice(valid_classes)) if valid_classes else self.class_ids[0]
 
+        if getattr(self, 'support_retriever', None) is not None:
+            return query_name, self.support_retriever.select(query_name, class_sample, self.shot), class_sample
+
         # 相邻切片 support（易任务）：不足 shot 再退回跨患者候选池补齐
         support_names = []
         if self.neighbor_prob > 0 and np.random.rand() < self.neighbor_prob:

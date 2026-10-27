@@ -99,11 +99,16 @@ def analyze_prediction(logits, scores, weights, target, temperature=.2):
 
 def initialize_datasets(config):
     from data.dataset import FSSDataset
+    from data.support_retrieval import configure_support_sampling
     entries = [entry.split(':', 1) for entry in config['joint_subdatasets'].split(',')]
     FSSDataset.initialize(512, entries[0][1], False)
-    return {name: FSSDataset.datasets[name](
+    result = {name: FSSDataset.datasets[name](
         path, 0, FSSDataset.transform, 'val', int(config['shot']), False,
         neighbor_prob=float(config['neighbor_prob'])) for name, path in entries}
+    for dataset in result.values():
+        configure_support_sampling(dataset, config.get('support_sampling', 'random'),
+                                   config.get('support_retrieval_dir'))
+    return result
 
 
 def balanced_select(rows, limit):

@@ -169,7 +169,8 @@ class AttentionLauncherTests(unittest.TestCase):
                     env = dict(os.environ, PATH=tmp + os.pathsep + os.environ['PATH'],
                                BBOX_SUPPORT_ATTN_MASK=str(bbox), ICL_SUPPORT_ATTN_MASK=str(icl),
                                CLASS_BALANCE_PROB='0.5', SUPPORT_MASK_POOLING='max',
-                               SUPPORT_FUSION='mean')
+                               SUPPORT_FUSION='mean', SUPPORT_SAMPLING='random',
+                               EPOCHS='100', LAYER3_MODE='finetune')
                     env.pop('EXPERIMENT_NAME', None)
                     result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                             env=env, capture_output=True, text=True, check=True)
@@ -179,8 +180,9 @@ class AttentionLauncherTests(unittest.TestCase):
                     expected = 'trn_joint4_papila_shot4_cb0.5_poolmax'
                     if bbox or icl:
                         expected += f'_bboxm{bbox}_iclm{icl}'
+                    expected += '_ep100'
                     self.assertEqual(args[args.index('--logpath') + 1], expected)
-                    self.assertEqual(args[args.index('--epochs') + 1], '300')
+                    self.assertEqual(args[args.index('--epochs') + 1], '100')
                     self.assertEqual(args[args.index('--n-episodes') + 1], '8000')
             env['BBOX_SUPPORT_ATTN_MASK'] = '2'
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
@@ -196,7 +198,7 @@ class AttentionLauncherTests(unittest.TestCase):
                 args = json.loads(result.stdout.splitlines()[-1])
                 self.assertEqual(args[args.index('--support-mask-pooling') + 1], policy)
                 self.assertEqual(args[args.index('--logpath') + 1],
-                                 'trn_joint4_papila_shot4_cb0.5_pool' + policy)
+                                 'trn_joint4_papila_shot4_cb0.5_pool' + policy + '_ep100')
             env['SUPPORT_MASK_POOLING'] = 'invalid'
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                     env=env, capture_output=True, text=True)
@@ -211,11 +213,12 @@ class AttentionLauncherTests(unittest.TestCase):
                               'else: print(json.dumps(sys.argv[1:]))\n')
             python.chmod(0o755)
             env = dict(os.environ, PATH=tmp + os.pathsep + os.environ['PATH'],
-                       SUPPORT_MASK_POOLING='max', SUPPORT_FUSION='quality',
+                       SUPPORT_MASK_POOLING='max', SUPPORT_FUSION='quality', SUPPORT_SAMPLING='random',
                        CLASS_BALANCE_PROB='0.5', BBOX_SUPPORT_ATTN_MASK='1',
                        ICL_SUPPORT_ATTN_MASK='1', GPU_ID='0,1,2',
                        FUSION_QUALITY_WEIGHT='0.1', FUSION_TARGET_TEMPERATURE='0.2',
-                       FUSION_WARMUP_EPOCHS='2', FUSION_RAMP_EPOCHS='3')
+                       FUSION_WARMUP_EPOCHS='2', FUSION_RAMP_EPOCHS='3',
+                       EPOCHS='100', LAYER3_MODE='finetune')
             env.pop('EXPERIMENT_NAME', None)
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                     env=env, capture_output=True, text=True, check=True)
@@ -227,7 +230,7 @@ class AttentionLauncherTests(unittest.TestCase):
                                 ('--fusion-warmup-epochs', '2'), ('--fusion-ramp-epochs', '3')]:
                 self.assertEqual(args[args.index(flag) + 1], value)
             self.assertEqual(args[args.index('--logpath') + 1],
-                             'trn_joint4_papila_shot4_cb0.5_poolmax_bboxm1_iclm1_fusionquality_qw0.1_qt0.2_fw2_fr3')
+                             'trn_joint4_papila_shot4_cb0.5_poolmax_bboxm1_iclm1_fusionquality_qw0.1_qt0.2_fw2_fr3_ep100')
             env['SUPPORT_FUSION'] = 'invalid'
             result = subprocess.run(['sh', str(ROOT / 'train_joint.sh')],
                                     env=env, capture_output=True, text=True)
